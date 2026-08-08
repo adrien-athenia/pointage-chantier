@@ -181,9 +181,17 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    height: var(--header-height-mobile);
+    /* min-height (et non height) : avec une hauteur fixe, le padding-top
+       de la safe area venait "manger" la hauteur du bandeau au lieu de
+       s'y ajouter, ce qui plaquait le bouton hamburger contre la zone
+       système iOS. min-height laisse la boîte grandir de la valeur de
+       la safe area quand elle existe, et reste à 56px inchangés partout
+       ailleurs (Android/desktop), où env(safe-area-inset-top) vaut 0. */
+    min-height: var(--header-height-mobile);
     padding: 0 16px;
-    padding-top: var(--safe-top);
+    padding-top: calc(0px + var(--safe-top));
+    padding-left: calc(16px + var(--safe-left));
+    padding-right: calc(16px + var(--safe-right));
     position: sticky;
     top: 0;
     z-index: 30;

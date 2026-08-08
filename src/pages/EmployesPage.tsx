@@ -5,6 +5,7 @@ import { Card } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import { Badge } from '../components/ui/Badge'
 import { EmptyState } from '../components/ui/EmptyState'
+import { EmployeInviteModal } from '../components/EmployeInviteModal'
 import { listAllProfiles } from '../services/employeService'
 import { getInitials } from '../lib/formatters'
 import type { Profile } from '../types/database'
@@ -13,6 +14,17 @@ export function EmployesPage() {
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [modalOpen, setModalOpen] = useState(false)
+  const [successMessage, setSuccessMessage] = useState<string | null>(null)
+
+  function loadProfiles() {
+    setLoading(true)
+    listAllProfiles().then((res) => {
+      setProfiles(res.data)
+      setError(res.error)
+      setLoading(false)
+    })
+  }
 
   useEffect(() => {
     let isMounted = true
@@ -29,17 +41,30 @@ export function EmployesPage() {
     }
   }, [])
 
+  function handleOpenModal() {
+    setSuccessMessage(null)
+    setModalOpen(true)
+  }
+
+  function handleInvited(email: string) {
+    setModalOpen(false)
+    setSuccessMessage(`Invitation envoyée à ${email}.`)
+    loadProfiles()
+  }
+
   return (
     <div>
       <PageHeader
         title="Employés"
         subtitle={`${profiles.length} employé${profiles.length > 1 ? 's' : ''}`}
         actions={
-          <Button icon={<Plus size={18} />} disabled title="Fonctionnalité à venir">
+          <Button icon={<Plus size={18} />} onClick={handleOpenModal}>
             Nouvel employé
           </Button>
         }
       />
+
+      {successMessage && <p className="inline-notice">{successMessage}</p>}
 
       {error && (
         <p className="error-banner">
@@ -74,6 +99,8 @@ export function EmployesPage() {
           ))}
         </div>
       )}
+
+      <EmployeInviteModal open={modalOpen} onClose={() => setModalOpen(false)} onInvited={handleInvited} />
     </div>
   )
 }

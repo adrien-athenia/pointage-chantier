@@ -439,6 +439,32 @@
   gap: 6px;
 }
 
+/* Modal ------------------------------------------------------------------ */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--color-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 100;
+}
+
+.modal-panel.card {
+  width: 100%;
+  max-width: 440px;
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+}
+
+.modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 4px;
+}
+
 /* Formulaire chantier (création/édition) */
 .chantier-form {
   display: flex;

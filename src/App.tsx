@@ -3,6 +3,7 @@ import { ProtectedRoute } from './components/ProtectedRoute'
 import { AdminLayout } from './layouts/AdminLayout'
 import { EmployeeLayout } from './layouts/EmployeeLayout'
 import { LoginPage } from './pages/LoginPage'
+import { SetPasswordPage } from './pages/SetPasswordPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { PointagesPage } from './pages/PointagesPage'
 import { ChantiersPage } from './pages/ChantiersPage'
@@ -17,6 +18,7 @@ function App() {
       <Routes>
         <Route index element={<Navigate to="/login" replace />} />
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/set-password" element={<SetPasswordPage />} />
 
         {/* Admin */}
         <Route

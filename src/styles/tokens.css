@@ -1,0 +1,58 @@
+:root {
+  /* Couleurs de base */
+  --color-bg: #0a0d14;
+  --color-bg-sidebar: #090c12;
+  --color-surface: #171c28;
+  --color-surface-alt: #1c2230;
+  --color-border: #2b3448;
+
+  --color-primary: #5599f7;
+  --color-primary-strong: #6fa8ff;
+  --color-primary-active-bg: #1e2f4b;
+  --color-primary-active-text: #bcd7ff;
+
+  --color-success: #63d492;
+  --color-success-bg: rgba(99, 212, 146, 0.12);
+  --color-success-border: rgba(99, 212, 146, 0.3);
+
+  --color-danger: #ef6464;
+  --color-danger-bg: rgba(239, 100, 100, 0.12);
+  --color-danger-border: rgba(239, 100, 100, 0.32);
+
+  --color-text: #f4f6fa;
+  --color-text-muted: #969fb3;
+  --color-text-subtle: #6f788a;
+
+  --color-overlay: rgba(5, 7, 12, 0.72);
+
+  /* Rayons */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-pill: 999px;
+
+  /* Espacements */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+
+  /* Ombres */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 28px -16px rgba(0, 0, 0, 0.55);
+  --shadow-drawer: 24px 0 48px rgba(0, 0, 0, 0.45);
+
+  /* Layout */
+  --sidebar-width: 280px;
+  --header-height-mobile: 56px;
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  --font-sans: 'Inter', system-ui, 'Segoe UI', Roboto, sans-serif;
+
+  color-scheme: dark;
+}

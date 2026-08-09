@@ -12,7 +12,7 @@ import { listChantiers } from '../services/chantierService'
 import { listEmployeeProfiles } from '../services/employeService'
 import { listPointagesWithRelations, type PointageWithRelations } from '../services/pointageService'
 import { buildInterventions, computeLiveMinutes, type Intervention } from '../lib/pointageStats'
-import { computeAnomalies, type AnomalyInfo } from '../lib/anomalies'
+import { computeAnomalies, classifyAccuracy, type AnomalyInfo } from '../lib/anomalies'
 import { buildPositionUrl } from '../lib/itineraire'
 import { formatDate, formatMinutes, formatTime } from '../lib/formatters'
 import type { Chantier, Profile } from '../types/database'
@@ -103,7 +103,8 @@ function EventDetailRow({
       <span className="ranking-row-name">
         {label} · {formatTime(pointage.pointe_at)}
         {pointage.distance_chantier_m != null && ` · ${Math.round(pointage.distance_chantier_m)} m du chantier`}
-        {pointage.gps_accuracy != null && ` · précision ±${Math.round(pointage.gps_accuracy)} m`}
+        {pointage.gps_accuracy != null &&
+          ` · précision ±${Math.round(pointage.gps_accuracy)} m (${classifyAccuracy(pointage.gps_accuracy)})`}
       </span>
       {positionUrl ? (
         <a className="btn btn-ghost btn-sm" href={positionUrl} target="_blank" rel="noopener noreferrer">

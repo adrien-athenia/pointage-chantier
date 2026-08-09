@@ -9,7 +9,7 @@ import { Button } from '../components/ui/Button'
 import { listAssignedActiveChantiers } from '../services/employeChantierService'
 import { createPointage, listOwnPointages, type PointageWithRelations } from '../services/pointageService'
 import { buildInterventions, computeLiveMinutes, getOpenIntervention } from '../lib/pointageStats'
-import { computeAnomalies } from '../lib/anomalies'
+import { computeAnomalies, ACCURACY_THRESHOLD_M } from '../lib/anomalies'
 import { getCurrentPositionSafe } from '../lib/geolocation'
 import { buildItineraireUrl } from '../lib/itineraire'
 import { formatDate, formatMinutes, formatTime } from '../lib/formatters'
@@ -25,6 +25,7 @@ export function EmployeePage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState<PointageType | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const [gpsNotice, setGpsNotice] = useState<string | null>(null)
   const [nowTick, setNowTick] = useState(() => Date.now())
 
   const refresh = useCallback(async (userId: string) => {
@@ -75,8 +76,19 @@ export function EmployeePage() {
 
     setSubmitting(type)
     setSubmitError(null)
+    setGpsNotice(null)
 
     const geo = await getCurrentPositionSafe()
+
+    // Un avis GPS n'empêche jamais le pointage : la position (même
+    // absente ou peu précise) est simplement transmise telle quelle, et
+    // l'employé est prévenu pour comprendre un éventuel badge côté admin.
+    if (geo.error) {
+      setGpsNotice(geo.error)
+    } else if (geo.accuracy != null && geo.accuracy > ACCURACY_THRESHOLD_M) {
+      setGpsNotice(`Position obtenue avec une précision faible (±${Math.round(geo.accuracy)} m). Le pointage est tout de même enregistré.`)
+    }
+
     const { error } = await createPointage({
       chantierId: targetChantierId,
       type,
@@ -215,6 +227,8 @@ export function EmployeePage() {
           </button>
         )}
       </div>
+
+      {gpsNotice && <p className="inline-notice">{gpsNotice}</p>}
 
       {submitError && (
         <p className="error-banner">

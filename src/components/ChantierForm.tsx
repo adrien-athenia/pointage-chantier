@@ -180,7 +180,15 @@ export function ChantierForm({ chantier, employes, onSaved, onCancel }: Chantier
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
-    if (submitting) return // empêche toute double soumission
+    // Empêche toute double soumission, ET empêche d'enregistrer tant qu'un
+    // géocodage est encore en cours : sans ce second verrou, un clic sur
+    // "Enregistrer" pendant que "Localiser à partir de l'adresse" est
+    // encore en vol envoie latitude/longitude encore à null (l'état React
+    // n'a pas fini de se mettre à jour), alors même que l'écran affichera
+    // "✓ Position GPS définie" quelques instants plus tard quand le
+    // géocodage aboutit — trop tard, après l'envoi. D'où des chantiers
+    // enregistrés sans coordonnées malgré un géocodage visiblement réussi.
+    if (submitting || geocodingLockRef.current) return
 
     setSubmitting(true)
     setError(null)
@@ -364,7 +372,7 @@ export function ChantierForm({ chantier, employes, onSaved, onCancel }: Chantier
 
         {error && <p className="field-error">{error}</p>}
 
-        <Button type="submit" disabled={submitting} block>
+        <Button type="submit" disabled={submitting || geoRequestStatus === 'loading'} block>
           {submitting ? (chantier ? 'Enregistrement…' : 'Création…') : chantier ? 'Enregistrer les modifications' : 'Créer le chantier'}
         </Button>
       </form>

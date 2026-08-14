@@ -9,12 +9,16 @@ export interface Profile {
   updated_at: string
 }
 
+export type ChantierStatut = 'actif' | 'termine' | 'archive'
+
 export interface Chantier {
   id: string
   nom: string
   adresse: string | null
   ville: string | null
+  /** @deprecated Miroir dérivé de `statut` côté base (trigger) — utiliser `statut`. Conservé pour compatibilité descendante. */
   actif: boolean
+  statut: ChantierStatut
   latitude: number | null
   longitude: number | null
   rayon_autorise: number
@@ -42,5 +46,14 @@ export interface EmployeChantier {
   employe_id: string
   chantier_id: string
   actif: boolean
+  created_at: string
+}
+
+export interface ChantierPhoto {
+  id: string
+  chantier_id: string
+  auteur_profile_id: string
+  storage_path: string
+  commentaire: string | null
   created_at: string
 }

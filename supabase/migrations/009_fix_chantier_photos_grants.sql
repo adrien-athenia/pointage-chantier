@@ -1,0 +1,31 @@
+-- ============================================================================
+-- PointageChantier — Correctif : privilèges SQL manquants sur chantier_photos
+--
+-- 008_chantier_photos.sql a créé la table, activé RLS et posé les policies,
+-- mais n'a jamais accordé le GRANT de table sous-jacent à `authenticated`.
+-- Or GRANT et policy RLS sont deux couches indépendantes : RLS ne fait que
+-- filtrer les LIGNES qu'une commande est autorisée à voir/écrire, mais
+-- Postgres exige d'abord un GRANT de base sur la table elle-même — sans
+-- lui, la requête échoue immédiatement avec "permission denied for table
+-- chantier_photos", avant même que les policies ne soient évaluées.
+--
+-- Les autres tables du projet (profiles, chantiers, pointages,
+-- employe_chantiers) fonctionnent sans GRANT explicite dans leurs
+-- migrations respectives car elles héritent des privilèges par défaut
+-- posés une fois par Supabase à la création du projet. chantier_photos,
+-- créée plus tard par une migration indépendante, n'en a pas hérité —
+-- d'où ce correctif ciblé, additif, sans toucher aux policies existantes.
+--
+-- Portée volontairement minimale :
+--   - authenticated uniquement (jamais anon) ;
+--   - SELECT + INSERT uniquement (jamais UPDATE ni DELETE : la table
+--     reste immuable, comme pointages) ;
+--   - aucune séquence à accorder : id est un uuid via gen_random_uuid(),
+--     pas de colonne serial/identity.
+--
+-- Idempotent : GRANT ne connaît pas "IF NOT EXISTS" mais est par nature
+-- rejouable sans erreur ni effet de bord (accorder un privilège déjà
+-- accordé est un no-op silencieux).
+-- ============================================================================
+
+grant select, insert on table public.chantier_photos to authenticated;

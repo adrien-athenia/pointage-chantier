@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import { Modal } from './ui/Modal'
 import { Input } from './ui/Input'
 import { Button } from './ui/Button'
@@ -17,6 +17,10 @@ export function EmployeInviteModal({ open, onClose, onInvited }: EmployeInviteMo
   const [email, setEmail] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Verrou synchrone (pas seulement le state `submitting`) : deux clics
+  // dans le même tick déclenchent deux gestionnaires avant que React
+  // n'ait recalculé `submitting` ; la ref, elle, est à jour immédiatement.
+  const submittingLockRef = useRef(false)
 
   function resetAndClose() {
     if (submitting) return
@@ -28,7 +32,7 @@ export function EmployeInviteModal({ open, onClose, onInvited }: EmployeInviteMo
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
-    if (submitting) return
+    if (submittingLockRef.current) return
 
     const trimmedName = fullName.trim()
     const trimmedEmail = email.trim()
@@ -42,11 +46,13 @@ export function EmployeInviteModal({ open, onClose, onInvited }: EmployeInviteMo
       return
     }
 
+    submittingLockRef.current = true
     setSubmitting(true)
     setError(null)
 
     const { data, error: inviteError } = await inviteEmploye({ fullName: trimmedName, email: trimmedEmail })
 
+    submittingLockRef.current = false
     setSubmitting(false)
 
     if (inviteError) {

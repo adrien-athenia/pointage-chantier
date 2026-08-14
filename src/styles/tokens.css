@@ -19,6 +19,10 @@
   --color-danger-bg: rgba(239, 100, 100, 0.12);
   --color-danger-border: rgba(239, 100, 100, 0.32);
 
+  --color-warning: #f0a94d;
+  --color-warning-bg: rgba(240, 169, 77, 0.12);
+  --color-warning-border: rgba(240, 169, 77, 0.32);
+
   --color-text: #f4f6fa;
   --color-text-muted: #969fb3;
   --color-text-subtle: #6f788a;

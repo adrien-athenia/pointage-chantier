@@ -18,6 +18,7 @@ export function LoginPage() {
   const [staySignedIn, setStaySignedIn] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [showForgotInfo, setShowForgotInfo] = useState(false)
 
   useEffect(() => {
     if (loading || !user) return
@@ -31,6 +32,8 @@ export function LoginPage() {
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
+    if (submitting) return // empêche toute double soumission (double-clic ou double Entrée)
+
     setErrorMsg(null)
     setSubmitting(true)
 
@@ -145,7 +148,20 @@ export function LoginPage() {
                 />
                 Rester connecté
               </label>
+
+              <button
+                type="button"
+                className="login-forgot-link"
+                onClick={() => setShowForgotInfo((value) => !value)}
+                aria-expanded={showForgotInfo}
+              >
+                Mot de passe oublié ?
+              </button>
             </div>
+
+            {showForgotInfo && (
+              <p className="login-forgot-info">Contactez votre administrateur pour réinitialiser votre mot de passe.</p>
+            )}
 
             {errorMsg && (
               <p className="field-error" role="alert">
@@ -153,11 +169,13 @@ export function LoginPage() {
               </p>
             )}
 
-            <Button type="submit" block disabled={submitting}>
+            <Button type="submit" block disabled={submitting} className="login-submit-btn">
               {submitting ? 'Connexion…' : 'Se connecter'}
             </Button>
           </form>
         </Card>
+
+        <p className="login-footer-signature">Propulsé par Athenia Automatisation</p>
       </div>
     </div>
   )

@@ -3,9 +3,12 @@ import type { Chantier, EmployeChantier } from '../types/database'
 import type { ServiceResult } from './chantierService'
 
 /**
- * Chantiers actifs auxquels un employé est affecté (RLS chantiers_select
- * applique la même règle côté base : cette requête ne fait qu'exposer ce
- * que l'employé peut de toute façon déjà lire).
+ * Chantiers au statut 'actif' auxquels un employé est affecté (RLS
+ * chantiers_select applique la même règle côté base pour la sélection
+ * courante). Un chantier terminé ou archivé n'apparaît plus ici, même
+ * s'il reste affecté — c'est le comportement attendu : il devient
+ * indisponible pour une NOUVELLE arrivée, sans jamais toucher à
+ * l'historique existant.
  */
 export async function listAssignedActiveChantiers(employeId: string): Promise<ServiceResult<Chantier[]>> {
   const { data: assignments, error: assignError } = await supabase
@@ -27,7 +30,7 @@ export async function listAssignedActiveChantiers(employeId: string): Promise<Se
     .from('chantiers')
     .select('*')
     .in('id', chantierIds)
-    .eq('actif', true)
+    .eq('statut', 'actif')
     .order('nom', { ascending: true })
 
   if (chantiersError) {
@@ -49,6 +52,67 @@ export async function listAssignmentsForChantier(chantierId: string): Promise<Se
   }
 
   return { data: (data ?? []) as EmployeChantier[], error: null }
+}
+
+/**
+ * Toutes les affectations (actives ou non) d'un employé — miroir de
+ * listAssignmentsForChantier ci-dessus, utilisé par la page Employés
+ * admin (panneau "Gérer") pour pré-cocher les chantiers déjà affectés.
+ */
+export async function listAssignmentsForEmploye(employeId: string): Promise<ServiceResult<EmployeChantier[]>> {
+  const { data, error } = await supabase
+    .from('employe_chantiers')
+    .select('employe_id, chantier_id, actif, created_at')
+    .eq('employe_id', employeId)
+
+  if (error) {
+    return { data: [], error: error.message }
+  }
+
+  return { data: (data ?? []) as EmployeChantier[], error: null }
+}
+
+/**
+ * Nombre d'employés actuellement affectés (actif=true) à chaque chantier,
+ * en une seule requête groupée plutôt qu'un appel par chantier — utilisé
+ * pour l'affichage compact des cartes de la page Chantiers admin.
+ */
+export async function listActiveAssignmentCounts(): Promise<ServiceResult<Map<string, number>>> {
+  const { data, error } = await supabase.from('employe_chantiers').select('chantier_id').eq('actif', true)
+
+  if (error) {
+    return { data: new Map(), error: error.message }
+  }
+
+  const counts = new Map<string, number>()
+  for (const row of data ?? []) {
+    const chantierId = row.chantier_id as string
+    counts.set(chantierId, (counts.get(chantierId) ?? 0) + 1)
+  }
+
+  return { data: counts, error: null }
+}
+
+/**
+ * Nombre de chantiers actifs actuellement affectés (actif=true), par
+ * employé — miroir de listActiveAssignmentCounts ci-dessus (groupé par
+ * chantier_id), utilisé pour l'affichage compact des cartes de la page
+ * Employés admin ("Chantiers affectés : X chantiers").
+ */
+export async function listActiveAssignmentCountsByEmploye(): Promise<ServiceResult<Map<string, number>>> {
+  const { data, error } = await supabase.from('employe_chantiers').select('employe_id').eq('actif', true)
+
+  if (error) {
+    return { data: new Map(), error: error.message }
+  }
+
+  const counts = new Map<string, number>()
+  for (const row of data ?? []) {
+    const employeId = row.employe_id as string
+    counts.set(employeId, (counts.get(employeId) ?? 0) + 1)
+  }
+
+  return { data: counts, error: null }
 }
 
 /** Crée ou met à jour l'affectation employé/chantier (admin uniquement, RLS l'impose). */

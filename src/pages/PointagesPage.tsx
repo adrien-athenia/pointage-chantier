@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, Inbox } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Inbox, X } from 'lucide-react'
 import { PageHeader } from '../components/ui/PageHeader'
 import { Card } from '../components/ui/Card'
 import { Select } from '../components/ui/Select'
@@ -14,8 +14,10 @@ import { listPointagesWithRelations, type PointageWithRelations } from '../servi
 import { buildInterventions, computeLiveMinutes, type Intervention } from '../lib/pointageStats'
 import { computeAnomalies, classifyAccuracy, type AnomalyInfo } from '../lib/anomalies'
 import { buildPositionUrl } from '../lib/itineraire'
-import { formatDate, formatMinutes, formatTime } from '../lib/formatters'
+import { formatDate, formatDurationHuman, formatMinutes, formatTime } from '../lib/formatters'
 import type { Chantier, Profile } from '../types/database'
+
+const GENERIC_LOAD_ERROR = 'Impossible de charger les pointages. Réessayez.'
 
 interface PointageRow {
   key: string
@@ -73,7 +75,7 @@ function buildRows(
         date: formatDate(intervention.arrivee.pointe_at),
         arriveeTime: formatTime(intervention.arrivee.pointe_at),
         departTime: intervention.depart ? formatTime(intervention.depart.pointe_at) : null,
-        workedLabel: intervention.workedMinutes !== null ? formatMinutes(intervention.workedMinutes) : null,
+        workedLabel: intervention.workedMinutes !== null ? formatDurationHuman(intervention.workedMinutes) : null,
         isOpen: intervention.isOpen,
         isPaused: intervention.isPaused,
         anomalies,
@@ -84,6 +86,41 @@ function buildRows(
   }
 
   return rows.sort((a, b) => b.sortValue - a.sortValue)
+}
+
+// État fonctionnel de l'intervention uniquement (jamais les anomalies —
+// voir ControlBadges ci-dessous pour ça, colonne séparée).
+function EtatBadge({ row }: { row: PointageRow }) {
+  if (row.isOpen) {
+    return <Badge variant={row.isPaused ? 'warning' : 'success'}>{row.isPaused ? 'En pause' : 'En cours'}</Badge>
+  }
+  return <Badge variant="neutral">Terminée</Badge>
+}
+
+// Contrôles/anomalies uniquement (jamais l'état) — réutilise directement
+// computeAnomalies, sans dupliquer sa logique.
+function ControlBadges({ anomalies }: { anomalies: AnomalyInfo[] }) {
+  if (anomalies.length === 0) {
+    return (
+      <div className="badge-group">
+        <Badge variant="success">
+          <CheckCircle2 size={13} />
+          Conforme
+        </Badge>
+      </div>
+    )
+  }
+
+  return (
+    <div className="badge-group">
+      {anomalies.map((anomaly) => (
+        <Badge key={anomaly.code} variant="danger">
+          <AlertTriangle size={13} />
+          {anomaly.label}
+        </Badge>
+      ))}
+    </div>
+  )
 }
 
 function EventDetailRow({
@@ -155,8 +192,11 @@ export function PointagesPage() {
       date: date || undefined,
     }).then((res) => {
       if (!isMounted) return
+      if (res.error) {
+        console.error('[PointagesPage] erreur Supabase lors du chargement des pointages :', res.error)
+      }
       setPointages(res.data)
-      setError(res.error)
+      setError(res.error ? GENERIC_LOAD_ERROR : null)
       setLoading(false)
       setSelectedKey(null)
     })
@@ -173,42 +213,32 @@ export function PointagesPage() {
   const rows = buildRows(pointages, chantierById, Date.now())
   const selectedRow = rows.find((row) => row.key === selectedKey) ?? null
 
+  const filtersActive = employeId !== '' || chantierId !== '' || date !== ''
+
+  function resetFilters() {
+    setEmployeId('')
+    setChantierId('')
+    setDate('')
+  }
+
+  function toggleDetails(key: string) {
+    setSelectedKey((current) => (current === key ? null : key))
+  }
+
   const columns: ResponsiveTableColumn<PointageRow>[] = [
-    { key: 'employe', header: 'Employé', render: (row) => row.employeName },
-    { key: 'chantier', header: 'Chantier', render: (row) => row.chantierName },
-    { key: 'date', header: 'Date', render: (row) => row.date },
-    { key: 'arrivee', header: 'Arrivée', render: (row) => row.arriveeTime },
-    { key: 'depart', header: 'Départ', render: (row) => row.departTime ?? '—' },
-    { key: 'duree', header: 'Durée', render: (row) => row.workedLabel ?? '—' },
-    {
-      key: 'statut',
-      header: 'Statut',
-      render: (row) => (
-        <div className="badge-group">
-          {row.isOpen ? (
-            <Badge variant={row.isPaused ? 'info' : 'success'}>{row.isPaused ? 'En pause' : 'En cours'}</Badge>
-          ) : (
-            <Badge variant={row.anomalies.length === 0 ? 'success' : 'neutral'}>
-              {row.anomalies.length === 0 ? 'Conforme' : 'Terminé'}
-            </Badge>
-          )}
-          {row.anomalies.map((anomaly) => (
-            <Badge key={anomaly.code} variant="danger">
-              {anomaly.label}
-            </Badge>
-          ))}
-        </div>
-      ),
-    },
+    { key: 'employe', header: 'Employé', render: (row) => <span className="col-employe">{row.employeName}</span> },
+    { key: 'chantier', header: 'Chantier', render: (row) => <span className="col-chantier">{row.chantierName}</span> },
+    { key: 'date', header: 'Date', render: (row) => <span className="col-time">{row.date}</span> },
+    { key: 'arrivee', header: 'Arrivée', render: (row) => <span className="col-time">{row.arriveeTime}</span> },
+    { key: 'depart', header: 'Départ', render: (row) => <span className="col-time">{row.departTime ?? '—'}</span> },
+    { key: 'duree', header: 'Durée', render: (row) => <span className="col-time">{row.workedLabel ?? '—'}</span> },
+    { key: 'etat', header: 'État', render: (row) => <EtatBadge row={row} /> },
+    { key: 'controle', header: 'Contrôle', render: (row) => <ControlBadges anomalies={row.anomalies} /> },
     {
       key: 'details',
       header: 'Détails',
       render: (row) => (
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => setSelectedKey((current) => (current === row.key ? null : row.key))}
-        >
+        <Button size="sm" variant="ghost" onClick={() => toggleDetails(row.key)}>
           {selectedKey === row.key ? 'Fermer' : 'Détails'}
         </Button>
       ),
@@ -242,6 +272,12 @@ export function PointagesPage() {
         </Select>
 
         <Input label="Date" type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+
+        {filtersActive && (
+          <Button variant="ghost" size="sm" icon={<X size={16} />} onClick={resetFilters}>
+            Réinitialiser les filtres
+          </Button>
+        )}
       </div>
 
       {error && (
@@ -259,9 +295,55 @@ export function PointagesPage() {
             icon={Inbox}
             title="Aucun pointage"
             description="Aucun pointage ne correspond à ces filtres pour le moment."
+            action={
+              filtersActive ? (
+                <Button variant="secondary" size="sm" onClick={resetFilters}>
+                  Réinitialiser les filtres
+                </Button>
+              ) : undefined
+            }
           />
         ) : (
-          <ResponsiveTable columns={columns} rows={rows} getRowKey={(row) => row.key} />
+          <>
+            <div className="pointages-table-wrap">
+              <ResponsiveTable columns={columns} rows={rows} getRowKey={(row) => row.key} />
+            </div>
+
+            <div className="pointages-cards">
+              {rows.map((row) => (
+                <Card key={row.key} variant="alt" className="pointage-card">
+                  <div className="pointage-card-top">
+                    <span className="pointage-card-name">{row.employeName}</span>
+                    <EtatBadge row={row} />
+                  </div>
+
+                  <p className="pointage-card-chantier">{row.chantierName}</p>
+
+                  <div className="pointage-card-row">
+                    <span>{row.date}</span>
+                    <span className="pointage-card-times">
+                      {row.arriveeTime} → {row.departTime ?? '—'}
+                    </span>
+                  </div>
+
+                  <div className="pointage-card-row">
+                    <span>Durée</span>
+                    <span className="pointage-card-duration">{row.workedLabel ?? '—'}</span>
+                  </div>
+
+                  <div className="pointage-card-controls">
+                    <ControlBadges anomalies={row.anomalies} />
+                  </div>
+
+                  <div className="pointage-card-footer">
+                    <Button variant="ghost" size="sm" onClick={() => toggleDetails(row.key)}>
+                      {selectedKey === row.key ? 'Fermer' : 'Voir les détails'}
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </>
         )}
       </Card>
 

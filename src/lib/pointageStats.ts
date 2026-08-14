@@ -1,4 +1,5 @@
 import type { Pointage } from '../types/database'
+import { isSameDay, startOfLocalDay, startOfLocalMonth, startOfLocalWeek } from './formatters'
 
 export interface PointageDurationStats {
   totalMinutes: number
@@ -149,6 +150,172 @@ export function computeLiveMinutes<T extends Pointage>(
   }
 }
 
+export interface PeriodTotals {
+  todayWorkedMinutes: number
+  todayPauseMinutes: number
+  weekWorkedMinutes: number
+  monthWorkedMinutes: number
+}
+
+/** Intersection en minutes entre deux intervalles (ms epoch), 0 si disjoints ou vides. */
+function intersectMinutes(aStartMs: number, aEndMs: number, bStartMs: number, bEndMs: number): number {
+  const start = Math.max(aStartMs, bStartMs)
+  const end = Math.min(aEndMs, bEndMs)
+  return end > start ? (end - start) / 60000 : 0
+}
+
+/**
+ * Temps réellement travaillé d'une intervention à l'intersection d'une
+ * fenêtre [windowStartMs, windowEndMs] : présence bornée à la fenêtre,
+ * moins uniquement les portions de pause qui intersectent cette même
+ * fenêtre (aucune pause hors fenêtre n'est jamais retranchée, aucune
+ * portion n'est comptée deux fois). Une intervention ou une pause encore
+ * ouverte est bornée par windowEndMs (on ne connaît leur fin réelle que
+ * jusqu'à "maintenant", qui est toujours la valeur passée ici). Retourne
+ * des zéros si l'intervention n'intersecte pas la fenêtre.
+ *
+ * Utilisée uniquement pour "Aujourd'hui" ci-dessous : Semaine/Mois
+ * continuent d'utiliser workedMinutes/pauseMinutes "pleins", inchangés.
+ */
+export function minutesInWindow<T extends Pointage>(
+  intervention: Intervention<T>,
+  windowStartMs: number,
+  windowEndMs: number,
+): { pauseMinutes: number; workedMinutes: number } {
+  const arriveeMs = new Date(intervention.arrivee.pointe_at).getTime()
+  const departMs = intervention.depart ? new Date(intervention.depart.pointe_at).getTime() : windowEndMs
+
+  const presenceMinutes = intersectMinutes(arriveeMs, departMs, windowStartMs, windowEndMs)
+  if (presenceMinutes <= 0) return { pauseMinutes: 0, workedMinutes: 0 }
+
+  let pauseMinutes = 0
+  for (const pause of intervention.pauses) {
+    pauseMinutes += intersectMinutes(
+      new Date(pause.debut.pointe_at).getTime(),
+      new Date(pause.fin.pointe_at).getTime(),
+      windowStartMs,
+      windowEndMs,
+    )
+  }
+  if (intervention.openPauseDebut) {
+    pauseMinutes += intersectMinutes(
+      new Date(intervention.openPauseDebut.pointe_at).getTime(),
+      windowEndMs,
+      windowStartMs,
+      windowEndMs,
+    )
+  }
+
+  return { pauseMinutes, workedMinutes: Math.max(0, presenceMinutes - pauseMinutes) }
+}
+
+/**
+ * Utilisé par le dashboard employé : agrège le temps travaillé/pause
+ * d'UN SEUL employé par période locale (jour / semaine en cours, lundi
+ * 00:00 → maintenant / mois en cours, 1er → maintenant), à partir de
+ * TOUTES ses interventions récentes (pas seulement celles d'aujourd'hui,
+ * pour bien couvrir la semaine et le mois).
+ *
+ * "Aujourd'hui" ne compte que la portion réellement travaillée dans la
+ * fenêtre [todayStart, nowMs] (via minutesInWindow ci-dessus) : une
+ * intervention (ouverte ou clôturée) qui déborde sur un autre jour ne
+ * contribue à "Aujourd'hui" que pour sa part réellement effectuée depuis
+ * minuit, jamais sa durée totale. Le compteur live (computeLiveMinutes),
+ * lui, n'est pas concerné par ce changement : il continue d'afficher la
+ * durée totale depuis l'arrivée, y compris sur plusieurs jours — c'est
+ * volontaire, cela rend un oubli de départ visible.
+ *
+ * "Cette semaine"/"Ce mois" restent basés sur la convention existante :
+ * une intervention est attribuée à la date locale de son départ (ou à
+ * "maintenant" si elle est encore ouverte), sans fenêtre — comportement
+ * inchangé.
+ */
+export function computePeriodTotals<T extends Pointage>(
+  interventions: Intervention<T>[],
+  nowMs: number,
+): PeriodTotals {
+  const now = new Date(nowMs)
+  const todayStart = startOfLocalDay(now).getTime()
+  const weekStart = startOfLocalWeek(now).getTime()
+  const monthStart = startOfLocalMonth(now).getTime()
+
+  let todayWorkedMinutes = 0
+  let todayPauseMinutes = 0
+  let weekWorkedMinutes = 0
+  let monthWorkedMinutes = 0
+
+  for (const intervention of interventions) {
+    const attributionMs = intervention.depart ? new Date(intervention.depart.pointe_at).getTime() : nowMs
+
+    const live = intervention.isOpen ? computeLiveMinutes(intervention, nowMs) : null
+    const workedMinutes = live ? live.workedMinutes : intervention.workedMinutes ?? 0
+
+    const today = minutesInWindow(intervention, todayStart, nowMs)
+    todayWorkedMinutes += today.workedMinutes
+    todayPauseMinutes += today.pauseMinutes
+
+    if (attributionMs >= weekStart) weekWorkedMinutes += workedMinutes
+    if (attributionMs >= monthStart) monthWorkedMinutes += workedMinutes
+  }
+
+  return { todayWorkedMinutes, todayPauseMinutes, weekWorkedMinutes, monthWorkedMinutes }
+}
+
+export interface ChantierHistoryEntry<T extends Pointage = Pointage> {
+  chantierId: string
+  /** Intervention clôturée la plus récente sur ce chantier — sert à lire
+   * les informations du chantier (nom, ville...) via son embed, et la
+   * date de dernière intervention. */
+  lastIntervention: Intervention<T>
+  totalWorkedMinutes: number
+  interventionCount: number
+}
+
+/**
+ * Agrège, par chantier, les interventions CLÔTURÉES d'un employé (date de
+ * dernière intervention, total d'heures travaillées, nombre
+ * d'interventions). Un chantier n'apparaît qu'une fois même s'il a été
+ * travaillé plusieurs jours ; une intervention encore ouverte ne compte
+ * jamais tant qu'elle n'est pas clôturée par un départ.
+ *
+ * Réutilisé par le dashboard employé pour : le KPI "chantiers
+ * effectués" (taille de la map), la liste "Chantiers terminés" (filtrer
+ * les entrées dont le chantier embarqué a statut='termine'), et les
+ * heures totales par chantier affichées dans cette section.
+ */
+export function summarizeByChantier<T extends Pointage>(
+  interventions: Intervention<T>[],
+): Map<string, ChantierHistoryEntry<T>> {
+  const summary = new Map<string, ChantierHistoryEntry<T>>()
+
+  for (const intervention of interventions) {
+    if (intervention.isOpen || intervention.workedMinutes === null) continue
+
+    const interventionDate = intervention.depart?.pointe_at ?? intervention.arrivee.pointe_at
+    const existing = summary.get(intervention.chantierId)
+
+    if (!existing) {
+      summary.set(intervention.chantierId, {
+        chantierId: intervention.chantierId,
+        lastIntervention: intervention,
+        totalWorkedMinutes: intervention.workedMinutes,
+        interventionCount: 1,
+      })
+      continue
+    }
+
+    existing.totalWorkedMinutes += intervention.workedMinutes
+    existing.interventionCount += 1
+
+    const existingDate = existing.lastIntervention.depart?.pointe_at ?? existing.lastIntervention.arrivee.pointe_at
+    if (new Date(interventionDate).getTime() > new Date(existingDate).getTime()) {
+      existing.lastIntervention = intervention
+    }
+  }
+
+  return summary
+}
+
 /**
  * Utilisé par le dashboard admin : agrège le temps réellement travaillé
  * (présence moins pauses) par employé et par chantier, à partir des
@@ -186,4 +353,113 @@ export function computeDurationStats(pointages: Pointage[]): PointageDurationSta
   }
 
   return { totalMinutes, minutesByEmploye, minutesByChantier }
+}
+
+export interface ChantierTodaySummary {
+  chantierId: string
+  workedMinutes: number
+  employeIds: Set<string>
+}
+
+/**
+ * Utilisé par le dashboard admin (carte "Chantiers aujourd'hui") : pour
+ * chaque chantier ayant eu de l'activité aujourd'hui, le temps réellement
+ * travaillé dans la fenêtre du jour (voir minutesInWindow) et l'ensemble
+ * des employés concernés, tous employés confondus.
+ */
+export function computeChantierTodaySummaries<T extends Pointage>(
+  pointages: T[],
+  nowMs: number,
+): Map<string, ChantierTodaySummary> {
+  const todayStart = startOfLocalDay(new Date(nowMs)).getTime()
+
+  const byEmploye = new Map<string, T[]>()
+  for (const pointage of pointages) {
+    const group = byEmploye.get(pointage.employe_id)
+    if (group) {
+      group.push(pointage)
+    } else {
+      byEmploye.set(pointage.employe_id, [pointage])
+    }
+  }
+
+  const summaries = new Map<string, ChantierTodaySummary>()
+
+  for (const [employeId, group] of byEmploye) {
+    const interventions = buildInterventions(group)
+
+    for (const intervention of interventions) {
+      const { workedMinutes } = minutesInWindow(intervention, todayStart, nowMs)
+      if (workedMinutes <= 0) continue
+
+      const existing = summaries.get(intervention.chantierId)
+      if (existing) {
+        existing.workedMinutes += workedMinutes
+        existing.employeIds.add(employeId)
+      } else {
+        summaries.set(intervention.chantierId, {
+          chantierId: intervention.chantierId,
+          workedMinutes,
+          employeIds: new Set([employeId]),
+        })
+      }
+    }
+  }
+
+  return summaries
+}
+
+export type EmployeeDayStatusKind = 'present' | 'pause' | 'termine' | 'absent'
+
+export interface EmployeeDayStatus<T extends Pointage = Pointage> {
+  status: EmployeeDayStatusKind
+  /** Intervention à l'origine du statut — null uniquement pour 'absent'. */
+  intervention: Intervention<T> | null
+}
+
+/**
+ * Utilisé par le dashboard admin (carte "Présence aujourd'hui") : pour
+ * chaque employé ayant au moins un pointage récent, dérive son statut
+ * courant à partir de sa dernière intervention — ouverte (présent/en
+ * pause), clôturée aujourd'hui (journée terminée), ou aucune des deux
+ * (pas encore pointé). L'intervention retournée permet ensuite de dériver
+ * l'heure à afficher et, via computeAnomalies, les anomalies éventuelles.
+ */
+export function computeEmployeeDayStatuses<T extends Pointage>(
+  pointages: T[],
+  nowMs: number,
+): Map<string, EmployeeDayStatus<T>> {
+  const now = new Date(nowMs)
+
+  const byEmploye = new Map<string, T[]>()
+  for (const pointage of pointages) {
+    const group = byEmploye.get(pointage.employe_id)
+    if (group) {
+      group.push(pointage)
+    } else {
+      byEmploye.set(pointage.employe_id, [pointage])
+    }
+  }
+
+  const statuses = new Map<string, EmployeeDayStatus<T>>()
+
+  for (const [employeId, group] of byEmploye) {
+    const interventions = buildInterventions(group)
+    const open = getOpenIntervention(interventions)
+
+    if (open) {
+      statuses.set(employeId, { status: open.isPaused ? 'pause' : 'present', intervention: open })
+      continue
+    }
+
+    const closedToday = [...interventions].reverse().find((i) => i.depart && isSameDay(i.depart.pointe_at, now))
+    if (closedToday) {
+      statuses.set(employeId, { status: 'termine', intervention: closedToday })
+      continue
+    }
+
+    statuses.set(employeId, { status: 'absent', intervention: null })
+  }
+
+  return statuses
 }

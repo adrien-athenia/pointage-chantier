@@ -321,6 +321,39 @@
   flex-wrap: wrap;
 }
 
+.login-forgot-link {
+  background: none;
+  border: none;
+  padding: 6px 0;
+  color: var(--color-primary);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+.login-forgot-link:hover {
+  color: var(--color-primary-strong);
+  text-decoration: underline;
+}
+
+.login-forgot-info {
+  margin-top: -6px;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+/* Bouton de connexion : texte blanc plutôt que la couleur .btn-primary
+   par défaut — override scopé à ce seul bouton (classe utilisée
+   uniquement ici) pour ne pas changer .btn-primary ailleurs dans l'app. */
+.btn-primary.login-submit-btn {
+  color: #ffffff;
+}
+
+.login-footer-signature {
+  margin-top: 20px;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--color-text-subtle);
+}
+
 @media (max-width: 480px) {
   .login-card.card {
     padding: 24px 18px;
@@ -379,6 +412,161 @@
   flex-shrink: 0;
 }
 
+/* Historique de pointages (espace employé) — variante dédiée de
+   ranking-row : contrairement à ranking-row-name (nowrap + ellipsis),
+   ces lignes portent trop d'informations pour tenir sur une seule ligne
+   sans troncature agressive (date, chantier, horaires, pause, durée).
+   Volontairement séparée plutôt que de modifier ranking-row-name, qui
+   reste utilisée telle quelle par d'autres listes (Mes chantiers,
+   Dashboard admin...). */
+.pointage-history-row {
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--color-border);
+  min-width: 0;
+}
+.pointage-history-row:last-child {
+  border-bottom: none;
+}
+
+.pointage-history-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pointage-history-label {
+  font-size: 0.9375rem;
+  color: var(--color-text);
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.pointage-history-duration {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: var(--color-text);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.pointage-history-meta {
+  margin-top: 2px;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+  overflow-wrap: break-word;
+}
+
+/* Présence aujourd'hui (dashboard admin) --------------------------------------- */
+.presence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.presence-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--color-border);
+}
+.presence-row:last-child {
+  border-bottom: none;
+}
+
+.presence-row-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.presence-row-name {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.presence-row-meta {
+  margin-top: 2px;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+}
+
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+.status-dot-present {
+  background: var(--color-success);
+}
+.status-dot-pause {
+  background: var(--color-primary);
+}
+.status-dot-termine {
+  background: var(--color-text-subtle);
+}
+.status-dot-absent {
+  background: transparent;
+  border: 1px solid var(--color-text-subtle);
+}
+
+/* À vérifier (dashboard admin) --------------------------------------------------- */
+.check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--color-border);
+}
+.check-row:last-child {
+  border-bottom: none;
+}
+
+.check-row-name {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.check-row-detail {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8125rem;
+  color: var(--color-danger);
+  flex-shrink: 0;
+}
+
+.check-ok {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 4px;
+  color: var(--color-success);
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.dashboard-card-footer {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* Filters bar --------------------------------------------------------------------- */
 .filters-bar {
   display: flex;
@@ -400,6 +588,87 @@
   .filters-bar .field {
     max-width: none;
   }
+}
+
+/* Pointages admin — tableau desktop / cartes mobile ---------------------------- */
+.pointages-table-wrap .col-time {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.pointages-table-wrap .col-employe,
+.pointages-table-wrap .col-chantier {
+  display: inline-block;
+  max-width: 220px;
+  overflow-wrap: break-word;
+}
+
+.pointages-cards {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .pointages-table-wrap {
+    display: none;
+  }
+
+  .pointages-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
+.pointage-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pointage-card-name {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.pointage-card-chantier {
+  margin-top: 4px;
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+}
+
+.pointage-card-row {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.8125rem;
+  color: var(--color-text-subtle);
+}
+
+.pointage-card-times {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.pointage-card-duration {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.pointage-card-controls {
+  margin-top: 12px;
+}
+
+.pointage-card-footer {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 /* Cards grid (chantiers / employés) ------------------------------------------------- */
@@ -560,4 +829,30 @@
   .photo-toolbar .field {
     max-width: none;
   }
+}
+
+.chantier-photo-img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  margin: 10px 0;
+  background: var(--color-surface-alt);
+}
+
+.chantier-photo-img-placeholder {
+  display: block;
+}
+
+.card-section-gap {
+  margin-top: 14px;
+}
+
+.chantier-photo-preview {
+  width: 100%;
+  max-height: 220px;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
 }

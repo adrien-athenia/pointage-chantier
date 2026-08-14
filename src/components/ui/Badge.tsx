@@ -1,6 +1,6 @@
 import type { HTMLAttributes } from 'react'
 
-export type BadgeVariant = 'success' | 'danger' | 'neutral' | 'info'
+export type BadgeVariant = 'success' | 'danger' | 'neutral' | 'info' | 'warning'
 
 interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
   variant?: BadgeVariant

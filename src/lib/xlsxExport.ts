@@ -121,6 +121,250 @@ function writeSectionHeader(sheet: ExcelJS.Worksheet, lastColumnLetter: string, 
   periodCell.font = { italic: true, size: 10, color: { argb: MUTED } }
 }
 
+/**
+ * Bandeau des 5 indicateurs clés (2 lignes : libellés puis valeurs), sur
+ * les colonnes A à E — partagé entre Dashboard et Synthèse pour une
+ * lecture cohérente d'une feuille à l'autre. Les valeurs proviennent
+ * uniquement de `totals` (computeExportTotals) : aucune recomputation ici.
+ */
+function writeKpiBand(sheet: ExcelJS.Worksheet, startRow: number, totals: ReturnType<typeof computeExportTotals>): number {
+  const kpiLabels = ['Employés', 'Chantiers', 'Interventions', 'Heures travaillées', 'Anomalies']
+  const kpiValues: Array<string | number> = [
+    totals.employeCount,
+    totals.chantierCount,
+    totals.interventionCount,
+    formatHoursReadable(totals.workedMinutes),
+    totals.anomalyCount,
+  ]
+
+  const kpiLabelRow = sheet.getRow(startRow)
+  const kpiValueRow = sheet.getRow(startRow + 1)
+  kpiLabels.forEach((label, index) => {
+    const col = index + 1
+    const labelCell = kpiLabelRow.getCell(col)
+    labelCell.value = label
+    labelCell.font = { bold: true, size: 10, color: { argb: NAVY } }
+    labelCell.alignment = { horizontal: 'center' }
+    labelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND_FILL } }
+
+    const valueCell = kpiValueRow.getCell(col)
+    valueCell.value = kpiValues[index]
+    valueCell.font = {
+      bold: true,
+      size: 18,
+      color: { argb: label === 'Anomalies' && totals.anomalyCount > 0 ? DANGER_TEXT : NAVY },
+    }
+    valueCell.alignment = { horizontal: 'center' }
+    valueCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND_FILL } }
+  })
+  kpiLabelRow.height = 18
+  kpiValueRow.height = 28
+
+  return startRow + 2
+}
+
+/**
+ * Règle de mise en forme conditionnelle "barre de données" — le graphique
+ * natif le plus proche de ce qu'ExcelJS sait produire (voir l'audit dans
+ * addDashboardSheet ci-dessous). `color` n'est pas listé dans les types
+ * ExcelJS publiés mais est bien lu à l'exécution par DatabarXform — d'où
+ * le cast.
+ */
+function dataBarRule(colorArgb: string): ExcelJS.DataBarRuleType {
+  return {
+    type: 'dataBar',
+    priority: 1,
+    gradient: false,
+    border: false,
+    showValue: true,
+    cfvo: [{ type: 'min' }, { type: 'max' }],
+    color: { argb: colorArgb },
+  } as ExcelJS.DataBarRuleType
+}
+
+interface LabeledValue {
+  label: string
+  value: number
+}
+
+/**
+ * Regroupe les ExportRow par jour calendaire (à partir de `arriveeIso`,
+ * déjà calculé) — même principe que summarizeRowsByEmploye/Chantier dans
+ * exportData.ts, mais gardé local à ce module car propre à la
+ * visualisation "Évolution des heures par jour" du Dashboard : aucune
+ * autre feuille n'en a besoin, et cela évite de faire grossir la surface
+ * publique d'exportData.ts pour un seul consommateur.
+ */
+function summarizeRowsByDay(rows: ExportRow[]): LabeledValue[] {
+  const map = new Map<string, number>()
+  for (const row of rows) {
+    const key = row.arriveeIso.slice(0, 10) // 'YYYY-MM-DD' → tri chronologique direct par égalité de chaîne
+    map.set(key, (map.get(key) ?? 0) + row.workedMinutes)
+  }
+  return [...map.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, workedMinutes]) => ({ label: formatDate(`${key}T00:00:00`), value: minutesToDecimalHours(workedMinutes) }))
+}
+
+/** Compte les anomalies par type (libellé) déjà calculées par computeAnomalies — aucune nouvelle règle. */
+function summarizeAnomaliesByType(rows: ExportRow[]): LabeledValue[] {
+  const map = new Map<string, number>()
+  for (const row of rows) {
+    for (const anomaly of row.anomalies) {
+      map.set(anomaly.label, (map.get(anomaly.label) ?? 0) + 1)
+    }
+  }
+  return [...map.entries()].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value)
+}
+
+/**
+ * Écrit une section "graphique" (titre + tableau à 2 colonnes + barre de
+ * données Excel native sur la colonne de valeurs) et renvoie le numéro de
+ * ligne suivant disponible. `emptyMessage` s'affiche à la place du
+ * tableau si `entries` est vide (ex. aucune anomalie sur la période).
+ */
+function writeBarSection(
+  sheet: ExcelJS.Worksheet,
+  startRow: number,
+  title: string,
+  columnLabels: [string, string],
+  entries: LabeledValue[],
+  barColorArgb: string,
+  valueNumFmt: string,
+  emptyMessage?: string,
+): number {
+  let row = startRow
+
+  sheet.mergeCells(`A${row}:F${row}`)
+  const titleCell = sheet.getCell(`A${row}`)
+  titleCell.value = title
+  titleCell.font = { bold: true, size: 13, color: { argb: NAVY } }
+  titleCell.border = { bottom: { style: 'thin', color: { argb: ACCENT_BLUE } } }
+  sheet.getRow(row).height = 22
+  row += 1
+
+  if (entries.length === 0) {
+    sheet.mergeCells(`A${row}:F${row}`)
+    const cell = sheet.getCell(`A${row}`)
+    cell.value = emptyMessage ?? '—'
+    cell.font = { italic: true, size: 11, color: { argb: SUCCESS_TEXT } }
+    sheet.getRow(row).height = 20
+    return row + 2
+  }
+
+  const headerRow = sheet.getRow(row)
+  headerRow.getCell(1).value = columnLabels[0]
+  headerRow.getCell(2).value = columnLabels[1]
+  styleHeaderRow(headerRow)
+  row += 1
+
+  const dataStartRow = row
+  for (const entry of entries) {
+    const dataRow = sheet.getRow(row)
+    dataRow.getCell(1).value = entry.label
+    dataRow.getCell(2).value = entry.value
+    dataRow.getCell(2).numFmt = valueNumFmt
+    styleDataRow(dataRow, [2])
+    row += 1
+  }
+  const dataEndRow = row - 1
+
+  sheet.addConditionalFormatting({
+    ref: `B${dataStartRow}:B${dataEndRow}`,
+    rules: [dataBarRule(barColorArgb)],
+  })
+
+  return row + 1
+}
+
+// ----------------------------------------------------------------------------
+// Feuille 0 — Dashboard
+// ----------------------------------------------------------------------------
+//
+// AUDIT — graphiques natifs Excel via ExcelJS :
+// ExcelJS (package publié sur npm, version installée ici : 4.4.0) n'expose
+// aucune API de CRÉATION de graphique natif (barres/lignes/secteurs) : sa
+// documentation et son changelog ne mentionnent les "chart" que pour ne pas
+// planter à la LECTURE d'un classeur qui en contient déjà un (issue #466,
+// "Don't break when loading an Excel file containing a chartsheet") — il
+// n'existe pas de `worksheet.addChart(...)` ni d'équivalent. Alternative
+// écartée : générer les graphiques comme IMAGES (ex. via un moteur de rendu
+// canvas côté Node) puis les insérer avec `workbook.addImage` — cette API
+// existe bien dans ExcelJS, mais elle produirait des images figées (donc
+// pas de mise à jour si l'utilisateur trie/filtre le classeur) et
+// ajouterait une dépendance de rendu graphique supplémentaire pour un
+// résultat au final moins fiable qu'une fonctionnalité native.
+// Solution retenue : les "barres de données" (data bars), une mise en
+// forme conditionnelle NATIVE d'Excel (`ConditionalFormattingRule` de type
+// `dataBar`, bien supportée par ExcelJS en écriture) rendent directement
+// dans la cellule une barre proportionnelle à la valeur — un vrai visuel
+// de type graphique, sans dépendance ajoutée, et qui reste un objet Excel
+// natif (donc fiable à l'ouverture, à l'impression et si les données sont
+// filtrées/triées).
+
+function addDashboardSheet(
+  workbook: ExcelJS.Workbook,
+  period: ExportPeriod,
+  totals: ReturnType<typeof computeExportTotals>,
+  byEmploye: ReturnType<typeof summarizeRowsByEmploye>,
+  byChantier: ReturnType<typeof summarizeRowsByChantier>,
+  rows: ExportRow[],
+  organizationName: string,
+): void {
+  const sheet = workbook.addWorksheet('Dashboard')
+  sheet.columns = [{ width: 28 }, { width: 17 }, { width: 17 }, { width: 15 }, { width: 13 }, { width: 13 }]
+  applyPrintSetup(sheet, 'portrait')
+  sheet.views = [{ state: 'normal', showGridLines: false }]
+
+  sheet.mergeCells('A1:F1')
+  const orgCell = sheet.getCell('A1')
+  orgCell.value = organizationName
+  orgCell.font = { bold: true, size: 13, color: { argb: NAVY } }
+  sheet.getRow(1).height = 20
+
+  sheet.mergeCells('A2:F2')
+  const titleCell = sheet.getCell('A2')
+  titleCell.value = 'Dashboard'
+  titleCell.font = { bold: true, size: 20, color: { argb: NAVY } }
+  sheet.getRow(2).height = 30
+
+  sheet.getCell('A4').value = 'Période'
+  sheet.getCell('A4').font = { bold: true, size: 10, color: { argb: MUTED } }
+  sheet.mergeCells('A5:D5')
+  sheet.getCell('A5').value = formatPeriodRange(period)
+  sheet.getCell('A5').font = { size: 12, color: { argb: NAVY } }
+
+  let row = writeKpiBand(sheet, 7, totals)
+  row += 1 // ligne vide après le bandeau KPI
+
+  const byEmployeEntries: LabeledValue[] = byEmploye.map((emp) => ({
+    label: emp.employeName,
+    value: minutesToDecimalHours(emp.workedMinutes),
+  }))
+  row = writeBarSection(sheet, row, 'Heures par salarié', ['Employé', 'Heures travaillées (h)'], byEmployeEntries, ACCENT_BLUE, HOURS_FORMAT)
+
+  const byChantierEntries: LabeledValue[] = byChantier.map((chantier) => ({
+    label: chantier.chantierName,
+    value: minutesToDecimalHours(chantier.workedMinutes),
+  }))
+  row = writeBarSection(sheet, row, 'Heures par chantier', ['Chantier', 'Heures travaillées (h)'], byChantierEntries, ACCENT_BLUE, HOURS_FORMAT)
+
+  const byDayEntries = summarizeRowsByDay(rows)
+  row = writeBarSection(sheet, row, 'Évolution des heures par jour', ['Date', 'Heures travaillées (h)'], byDayEntries, ACCENT_BLUE, HOURS_FORMAT)
+
+  const anomaliesByType = summarizeAnomaliesByType(rows)
+  writeBarSection(
+    sheet,
+    row,
+    'Anomalies',
+    ["Type d’anomalie", 'Occurrences'],
+    anomaliesByType,
+    DANGER_TEXT,
+    '0',
+    'Aucune anomalie sur la période.',
+  )
+}
+
 // ----------------------------------------------------------------------------
 // Feuille 1 — Synthèse
 // ----------------------------------------------------------------------------
@@ -154,40 +398,7 @@ function addSyntheseSheet(
   sheet.getCell('A5').value = formatPeriodRange(period)
   sheet.getCell('A5').font = { size: 12, color: { argb: NAVY } }
 
-  // Bandeau KPI (2 lignes : libellés puis valeurs), 5 indicateurs sur les
-  // colonnes A à E — les valeurs réelles proviennent uniquement de `totals`
-  // (computeExportTotals), aucune recomputation ici.
-  const kpiLabels = ['Employés', 'Chantiers', 'Interventions', 'Heures travaillées', 'Anomalies']
-  const kpiValues: Array<string | number> = [
-    totals.employeCount,
-    totals.chantierCount,
-    totals.interventionCount,
-    formatHoursReadable(totals.workedMinutes),
-    totals.anomalyCount,
-  ]
-
-  const kpiLabelRow = sheet.getRow(7)
-  const kpiValueRow = sheet.getRow(8)
-  kpiLabels.forEach((label, index) => {
-    const col = index + 1
-    const labelCell = kpiLabelRow.getCell(col)
-    labelCell.value = label
-    labelCell.font = { bold: true, size: 10, color: { argb: NAVY } }
-    labelCell.alignment = { horizontal: 'center' }
-    labelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND_FILL } }
-
-    const valueCell = kpiValueRow.getCell(col)
-    valueCell.value = kpiValues[index]
-    valueCell.font = {
-      bold: true,
-      size: 18,
-      color: { argb: label === 'Anomalies' && totals.anomalyCount > 0 ? DANGER_TEXT : NAVY },
-    }
-    valueCell.alignment = { horizontal: 'center' }
-    valueCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND_FILL } }
-  })
-  kpiLabelRow.height = 18
-  kpiValueRow.height = 28
+  writeKpiBand(sheet, 7, totals)
 
   sheet.mergeCells('A10:F10')
   const sectionCell = sheet.getCell('A10')
@@ -590,6 +801,7 @@ export function buildWorkbook(params: BuildXlsxParams): ExcelJS.Workbook {
   const byEmploye = summarizeRowsByEmploye(rows)
   const byChantier = summarizeRowsByChantier(rows)
 
+  addDashboardSheet(workbook, period, totals, byEmploye, byChantier, rows, orgName)
   addSyntheseSheet(workbook, period, totals, byEmploye, orgName)
   addParSalarieSheet(workbook, period, totals, byEmploye)
   addParChantierSheet(workbook, period, totals, byChantier)

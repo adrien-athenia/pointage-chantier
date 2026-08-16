@@ -6,25 +6,119 @@ import {
   summarizeRowsByChantier,
   summarizeRowsByEmploye,
   type ExportAnomaly,
+  type ExportEtat,
   type ExportPeriod,
   type ExportRow,
 } from './exportData'
 import { formatDate, formatTime } from './formatters'
 
-const HEADER_FILL = 'FF1E2F4B'
-const HEADER_FONT = 'FFFFFFFF'
-const MUTED_FONT = 'FF6F788A'
-const SUCCESS_FONT = 'FF1F9D63'
+// ----------------------------------------------------------------------------
+// Identité visuelle — reprend la palette de l'app (tokens.css) : bleu sombre
+// / bleu professionnel / blanc. Les teintes "danger"/"succès"/"warning" sont
+// légèrement assombries par rapport aux tokens CSS d'origine pour rester
+// lisibles à l'impression papier (le contraste web n'est pas toujours
+// suffisant sur du papier ou dans une prévisualisation grand écran).
+// ----------------------------------------------------------------------------
+const NAVY = 'FF1E2F4B' // --color-primary-active-bg
+const ACCENT_BLUE = 'FF5599F7' // --color-primary
+const MUTED = 'FF6F788A'
+const BORDER_LIGHT = 'FFD8DEE8'
+const BAND_FILL = 'FFE7EEFB' // fond léger des zones KPI / lignes TOTAL
+const SUCCESS_TEXT = 'FF1F9D63'
+const DANGER_TEXT = 'FFC1432E'
+const WARNING_TEXT = 'FFB8791F'
+const WHITE = 'FFFFFFFF'
 
 const HOURS_FORMAT = '0.00'
+const DEFAULT_ORG_NAME = 'PointageChantier'
 
+const thinBorderSide = { style: 'thin' as const, color: { argb: BORDER_LIGHT } }
+const THIN_BORDER: Partial<ExcelJS.Borders> = {
+  top: thinBorderSide,
+  left: thinBorderSide,
+  bottom: thinBorderSide,
+  right: thinBorderSide,
+}
+
+/**
+ * "8h00" / "7h30" / "0h30" — pendant format lisible du nombre de minutes
+ * déjà calculé ailleurs (buildInterventions/computeLiveMinutes). Purement
+ * présentationnel : n'affecte jamais la valeur numérique source, qui reste
+ * disponible telle quelle dans la colonne "Heures décimales" adjacente.
+ */
+export function formatHoursReadable(minutes: number): string {
+  const rounded = Math.round(minutes)
+  const hours = Math.floor(rounded / 60)
+  const remaining = rounded % 60
+  return `${hours}h${String(remaining).padStart(2, '0')}`
+}
+
+function formatDateFromMs(ms: number): string {
+  return new Date(ms).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+}
+
+function formatPeriodRange(period: ExportPeriod): string {
+  return `du ${formatDateFromMs(period.startMs)} au ${formatDateFromMs(period.endMs)}`
+}
+
+function etatColor(etat: ExportEtat): string | null {
+  if (etat === 'En cours') return SUCCESS_TEXT
+  if (etat === 'En pause') return WARNING_TEXT
+  return null // "Terminée" : couleur de texte par défaut, pas de mise en avant
+}
+
+function applyPrintSetup(sheet: ExcelJS.Worksheet, orientation: 'portrait' | 'landscape'): void {
+  sheet.pageSetup = {
+    orientation,
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    margins: { top: 0.6, bottom: 0.6, left: 0.5, right: 0.5, header: 0.3, footer: 0.3 },
+  }
+}
+
+/** En-tête de tableau : fond bleu sombre, texte blanc, bordures, gel possible via l'appelant. */
 function styleHeaderRow(row: ExcelJS.Row): void {
   row.eachCell((cell) => {
-    cell.font = { bold: true, color: { argb: HEADER_FONT } }
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEADER_FILL } }
-    cell.alignment = { vertical: 'middle' }
+    cell.font = { bold: true, color: { argb: WHITE }, size: 11 }
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY } }
+    cell.alignment = { vertical: 'middle', horizontal: 'left' }
+    cell.border = THIN_BORDER
+  })
+  row.height = 22
+}
+
+/** Ligne de donnée standard : bordures légères, alignement vertical centré. */
+function styleDataRow(row: ExcelJS.Row, rightAlignColumns: number[] = []): void {
+  row.eachCell((cell, colNumber) => {
+    cell.border = THIN_BORDER
+    cell.alignment = { vertical: 'middle', horizontal: rightAlignColumns.includes(colNumber) ? 'right' : 'left' }
+  })
+  row.height = 18
+}
+
+/** Ligne TOTAL : fond bleu très clair, texte bleu sombre en gras — se détache sans être criarde. */
+function styleTotalRow(row: ExcelJS.Row): void {
+  row.eachCell((cell) => {
+    cell.font = { bold: true, color: { argb: NAVY } }
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND_FILL } }
+    cell.border = THIN_BORDER
   })
   row.height = 20
+}
+
+/** Bandeau de titre de section en haut d'une feuille secondaire (titre + période). */
+function writeSectionHeader(sheet: ExcelJS.Worksheet, lastColumnLetter: string, title: string, period: ExportPeriod): void {
+  sheet.mergeCells(`A1:${lastColumnLetter}1`)
+  const titleCell = sheet.getCell('A1')
+  titleCell.value = title
+  titleCell.font = { bold: true, size: 14, color: { argb: NAVY } }
+  sheet.getRow(1).height = 26
+
+  sheet.mergeCells(`A2:${lastColumnLetter}2`)
+  const periodCell = sheet.getCell('A2')
+  periodCell.value = `Période : ${period.label} (${formatPeriodRange(period)})`
+  periodCell.font = { italic: true, size: 10, color: { argb: MUTED } }
 }
 
 // ----------------------------------------------------------------------------
@@ -36,66 +130,107 @@ function addSyntheseSheet(
   period: ExportPeriod,
   totals: ReturnType<typeof computeExportTotals>,
   byEmploye: ReturnType<typeof summarizeRowsByEmploye>,
+  organizationName: string,
 ): void {
   const sheet = workbook.addWorksheet('Synthèse')
-  sheet.columns = [{ width: 28 }, { width: 20 }, { width: 22 }, { width: 20 }, { width: 14 }]
+  sheet.columns = [{ width: 28 }, { width: 17 }, { width: 17 }, { width: 15 }, { width: 13 }, { width: 13 }]
+  applyPrintSetup(sheet, 'landscape')
 
-  const titleRow = sheet.addRow(['PointageChantier — Synthèse'])
-  titleRow.getCell(1).font = { bold: true, size: 16 }
+  sheet.mergeCells('A1:F1')
+  const orgCell = sheet.getCell('A1')
+  orgCell.value = organizationName
+  orgCell.font = { bold: true, size: 13, color: { argb: NAVY } }
+  sheet.getRow(1).height = 20
 
-  const periodRow = sheet.addRow([`Période : ${period.label}`])
-  periodRow.getCell(1).font = { italic: true, color: { argb: MUTED_FONT } }
+  sheet.mergeCells('A2:F2')
+  const titleCell = sheet.getCell('A2')
+  titleCell.value = 'Synthèse des heures'
+  titleCell.font = { bold: true, size: 20, color: { argb: NAVY } }
+  sheet.getRow(2).height = 30
 
-  sheet.addRow([])
+  sheet.getCell('A4').value = 'Période'
+  sheet.getCell('A4').font = { bold: true, size: 10, color: { argb: MUTED } }
+  sheet.mergeCells('A5:D5')
+  sheet.getCell('A5').value = formatPeriodRange(period)
+  sheet.getCell('A5').font = { size: 12, color: { argb: NAVY } }
 
-  const kpis: Array<[string, number, string?]> = [
-    ["Nombre d’employés", totals.employeCount],
-    ['Nombre de chantiers', totals.chantierCount],
-    ['Total heures travaillées', minutesToDecimalHours(totals.workedMinutes), HOURS_FORMAT],
-    ["Nombre d’interventions", totals.interventionCount],
-    ["Nombre d’anomalies", totals.anomalyCount],
+  // Bandeau KPI (2 lignes : libellés puis valeurs), 5 indicateurs sur les
+  // colonnes A à E — les valeurs réelles proviennent uniquement de `totals`
+  // (computeExportTotals), aucune recomputation ici.
+  const kpiLabels = ['Employés', 'Chantiers', 'Interventions', 'Heures travaillées', 'Anomalies']
+  const kpiValues: Array<string | number> = [
+    totals.employeCount,
+    totals.chantierCount,
+    totals.interventionCount,
+    formatHoursReadable(totals.workedMinutes),
+    totals.anomalyCount,
   ]
-  for (const [label, value, numFmt] of kpis) {
-    const row = sheet.addRow([label, value])
-    row.getCell(1).font = { bold: true }
-    if (numFmt) row.getCell(2).numFmt = numFmt
-  }
 
-  sheet.addRow([])
+  const kpiLabelRow = sheet.getRow(7)
+  const kpiValueRow = sheet.getRow(8)
+  kpiLabels.forEach((label, index) => {
+    const col = index + 1
+    const labelCell = kpiLabelRow.getCell(col)
+    labelCell.value = label
+    labelCell.font = { bold: true, size: 10, color: { argb: NAVY } }
+    labelCell.alignment = { horizontal: 'center' }
+    labelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND_FILL } }
 
-  const headerRow = sheet.addRow([
-    'Employé',
-    'Heures travaillées',
-    "Nombre d’interventions",
-    'Nombre de chantiers',
-    'Anomalies',
-  ])
-  const headerRowNumber = headerRow.number
+    const valueCell = kpiValueRow.getCell(col)
+    valueCell.value = kpiValues[index]
+    valueCell.font = {
+      bold: true,
+      size: 18,
+      color: { argb: label === 'Anomalies' && totals.anomalyCount > 0 ? DANGER_TEXT : NAVY },
+    }
+    valueCell.alignment = { horizontal: 'center' }
+    valueCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND_FILL } }
+  })
+  kpiLabelRow.height = 18
+  kpiValueRow.height = 28
+
+  sheet.mergeCells('A10:F10')
+  const sectionCell = sheet.getCell('A10')
+  sectionCell.value = 'Synthèse par salarié'
+  sectionCell.font = { bold: true, size: 13, color: { argb: NAVY } }
+  sectionCell.border = { bottom: { style: 'thin', color: { argb: ACCENT_BLUE } } }
+  sheet.getRow(10).height = 22
+
+  const headerRow = sheet.getRow(11)
+  ;['Employé', 'Temps travaillé', 'Heures décimales', 'Interventions', 'Chantiers', 'Anomalies'].forEach(
+    (label, index) => {
+      headerRow.getCell(index + 1).value = label
+    },
+  )
   styleHeaderRow(headerRow)
 
+  let rowNumber = 12
   for (const emp of byEmploye) {
-    const row = sheet.addRow([
-      emp.employeName,
-      minutesToDecimalHours(emp.workedMinutes),
-      emp.interventionCount,
-      emp.chantierIds.size,
-      emp.anomalyCount,
-    ])
-    row.getCell(2).numFmt = HOURS_FORMAT
+    const row = sheet.getRow(rowNumber)
+    row.getCell(1).value = emp.employeName
+    row.getCell(2).value = formatHoursReadable(emp.workedMinutes)
+    row.getCell(3).value = minutesToDecimalHours(emp.workedMinutes)
+    row.getCell(3).numFmt = HOURS_FORMAT
+    row.getCell(4).value = emp.interventionCount
+    row.getCell(5).value = emp.chantierIds.size
+    row.getCell(6).value = emp.anomalyCount
+    if (emp.anomalyCount > 0) row.getCell(6).font = { color: { argb: DANGER_TEXT }, bold: true }
+    styleDataRow(row, [2, 3, 4, 5, 6])
+    rowNumber += 1
   }
 
-  const totalRow = sheet.addRow([
-    'TOTAL',
-    minutesToDecimalHours(totals.workedMinutes),
-    totals.interventionCount,
-    totals.chantierCount,
-    totals.anomalyCount,
-  ])
-  totalRow.font = { bold: true }
-  totalRow.getCell(2).numFmt = HOURS_FORMAT
+  const totalRow = sheet.getRow(rowNumber)
+  totalRow.getCell(1).value = 'TOTAL'
+  totalRow.getCell(2).value = formatHoursReadable(totals.workedMinutes)
+  totalRow.getCell(3).value = minutesToDecimalHours(totals.workedMinutes)
+  totalRow.getCell(3).numFmt = HOURS_FORMAT
+  totalRow.getCell(4).value = totals.interventionCount
+  totalRow.getCell(5).value = totals.chantierCount
+  totalRow.getCell(6).value = totals.anomalyCount
+  styleTotalRow(totalRow)
 
-  sheet.views = [{ state: 'frozen', ySplit: headerRowNumber }]
-  sheet.autoFilter = `A${headerRowNumber}:E${headerRowNumber}`
+  sheet.views = [{ state: 'frozen', ySplit: 11 }]
+  sheet.autoFilter = 'A11:F11'
 }
 
 // ----------------------------------------------------------------------------
@@ -110,40 +245,63 @@ function addParSalarieSheet(
 ): void {
   const sheet = workbook.addWorksheet('Par salarié')
   sheet.columns = [
-    { header: 'Employé', key: 'employe', width: 26 },
-    { header: 'Période', key: 'periode', width: 26 },
-    { header: "Nombre d’interventions", key: 'interventions', width: 20 },
-    { header: 'Temps de pause', key: 'pause', width: 16 },
-    { header: 'Heures travaillées', key: 'heures', width: 18 },
-    { header: 'Anomalies', key: 'anomalies', width: 14 },
+    { key: 'employe', width: 24 },
+    { key: 'periode', width: 20 },
+    { key: 'interventions', width: 14 },
+    { key: 'pause', width: 14 },
+    { key: 'pauseDecimale', width: 14 },
+    { key: 'heures', width: 15 },
+    { key: 'heuresDecimales', width: 15 },
+    { key: 'anomalies', width: 12 },
   ]
-  styleHeaderRow(sheet.getRow(1))
+  applyPrintSetup(sheet, 'landscape')
+  writeSectionHeader(sheet, 'H', 'Par salarié', period)
+  sheet.addRow([])
+
+  const headerRow = sheet.addRow({
+    employe: 'Employé',
+    periode: 'Période',
+    interventions: 'Interventions',
+    pause: 'Temps de pause',
+    pauseDecimale: 'Pause décimale',
+    heures: 'Temps travaillé',
+    heuresDecimales: 'Heures décimales',
+    anomalies: 'Anomalies',
+  })
+  styleHeaderRow(headerRow)
 
   for (const emp of byEmploye) {
-    sheet.addRow({
+    const row = sheet.addRow({
       employe: emp.employeName,
       periode: period.label,
       interventions: emp.interventionCount,
-      pause: minutesToDecimalHours(emp.pauseMinutes),
-      heures: minutesToDecimalHours(emp.workedMinutes),
+      pause: formatHoursReadable(emp.pauseMinutes),
+      pauseDecimale: minutesToDecimalHours(emp.pauseMinutes),
+      heures: formatHoursReadable(emp.workedMinutes),
+      heuresDecimales: minutesToDecimalHours(emp.workedMinutes),
       anomalies: emp.anomalyCount,
     })
+    if (emp.anomalyCount > 0) row.getCell(8).font = { color: { argb: DANGER_TEXT }, bold: true }
+    styleDataRow(row, [3, 4, 5, 6, 7, 8])
   }
 
+  const totalPauseMinutes = byEmploye.reduce((sum, emp) => sum + emp.pauseMinutes, 0)
   const totalRow = sheet.addRow({
     employe: 'TOTAL',
     periode: '',
     interventions: totals.interventionCount,
-    pause: minutesToDecimalHours(byEmploye.reduce((sum, emp) => sum + emp.pauseMinutes, 0)),
-    heures: minutesToDecimalHours(totals.workedMinutes),
+    pause: formatHoursReadable(totalPauseMinutes),
+    pauseDecimale: minutesToDecimalHours(totalPauseMinutes),
+    heures: formatHoursReadable(totals.workedMinutes),
+    heuresDecimales: minutesToDecimalHours(totals.workedMinutes),
     anomalies: totals.anomalyCount,
   })
-  totalRow.font = { bold: true }
+  styleTotalRow(totalRow)
 
-  sheet.getColumn('pause').numFmt = HOURS_FORMAT
-  sheet.getColumn('heures').numFmt = HOURS_FORMAT
-  sheet.views = [{ state: 'frozen', ySplit: 1 }]
-  sheet.autoFilter = 'A1:F1'
+  sheet.getColumn('pauseDecimale').numFmt = HOURS_FORMAT
+  sheet.getColumn('heuresDecimales').numFmt = HOURS_FORMAT
+  sheet.views = [{ state: 'frozen', ySplit: 4 }]
+  sheet.autoFilter = 'A4:H4'
 }
 
 // ----------------------------------------------------------------------------
@@ -152,69 +310,109 @@ function addParSalarieSheet(
 
 function addParChantierSheet(
   workbook: ExcelJS.Workbook,
+  period: ExportPeriod,
   totals: ReturnType<typeof computeExportTotals>,
   byChantier: ReturnType<typeof summarizeRowsByChantier>,
 ): void {
   const sheet = workbook.addWorksheet('Par chantier')
   sheet.columns = [
-    { header: 'Chantier', key: 'chantier', width: 28 },
-    { header: 'Nombre de salariés', key: 'salaries', width: 18 },
-    { header: "Nombre d’interventions", key: 'interventions', width: 20 },
-    { header: 'Heures travaillées', key: 'heures', width: 18 },
-    { header: 'Anomalies', key: 'anomalies', width: 14 },
+    { key: 'chantier', width: 26 },
+    { key: 'salaries', width: 13 },
+    { key: 'interventions', width: 15 },
+    { key: 'heures', width: 15 },
+    { key: 'heuresDecimales', width: 16 },
+    { key: 'anomalies', width: 12 },
   ]
-  styleHeaderRow(sheet.getRow(1))
+  applyPrintSetup(sheet, 'landscape')
+  writeSectionHeader(sheet, 'F', 'Par chantier', period)
+  sheet.addRow([])
+
+  const headerRow = sheet.addRow({
+    chantier: 'Chantier',
+    salaries: 'Salariés',
+    interventions: 'Interventions',
+    heures: 'Temps travaillé',
+    heuresDecimales: 'Heures décimales',
+    anomalies: 'Anomalies',
+  })
+  styleHeaderRow(headerRow)
 
   for (const chantier of byChantier) {
-    sheet.addRow({
+    const row = sheet.addRow({
       chantier: chantier.chantierName,
       salaries: chantier.employeIds.size,
       interventions: chantier.interventionCount,
-      heures: minutesToDecimalHours(chantier.workedMinutes),
+      heures: formatHoursReadable(chantier.workedMinutes),
+      heuresDecimales: minutesToDecimalHours(chantier.workedMinutes),
       anomalies: chantier.anomalyCount,
     })
+    if (chantier.anomalyCount > 0) row.getCell(6).font = { color: { argb: DANGER_TEXT }, bold: true }
+    styleDataRow(row, [2, 3, 4, 5, 6])
   }
 
   const totalRow = sheet.addRow({
     chantier: 'TOTAL',
     salaries: totals.employeCount,
     interventions: totals.interventionCount,
-    heures: minutesToDecimalHours(totals.workedMinutes),
+    heures: formatHoursReadable(totals.workedMinutes),
+    heuresDecimales: minutesToDecimalHours(totals.workedMinutes),
     anomalies: totals.anomalyCount,
   })
-  totalRow.font = { bold: true }
+  styleTotalRow(totalRow)
 
-  sheet.getColumn('heures').numFmt = HOURS_FORMAT
-  sheet.views = [{ state: 'frozen', ySplit: 1 }]
-  sheet.autoFilter = 'A1:E1'
+  sheet.getColumn('heuresDecimales').numFmt = HOURS_FORMAT
+  sheet.views = [{ state: 'frozen', ySplit: 4 }]
+  sheet.autoFilter = 'A4:F4'
 }
 
 // ----------------------------------------------------------------------------
 // Feuille 4 — Détail pointages
 // ----------------------------------------------------------------------------
 
-function addDetailSheet(workbook: ExcelJS.Workbook, rows: ExportRow[]): void {
+function addDetailSheet(workbook: ExcelJS.Workbook, period: ExportPeriod, rows: ExportRow[]): void {
   const sheet = workbook.addWorksheet('Détail pointages')
   sheet.columns = [
-    { header: 'Date', key: 'date', width: 12 },
-    { header: 'Employé', key: 'employe', width: 24 },
-    { header: 'Chantier', key: 'chantier', width: 26 },
-    { header: 'Arrivée', key: 'arrivee', width: 10 },
-    { header: 'Début pause', key: 'pauseDebut', width: 12 },
-    { header: 'Fin pause', key: 'pauseFin', width: 10 },
-    { header: 'Départ', key: 'depart', width: 10 },
-    { header: 'Temps pause', key: 'tempsPause', width: 13 },
-    { header: 'Temps travaillé', key: 'tempsTravaille', width: 15 },
-    { header: 'État', key: 'etat', width: 12 },
-    { header: 'Distance GPS (m)', key: 'distance', width: 16 },
-    { header: 'Précision GPS (m)', key: 'precision', width: 17 },
-    { header: 'Contrôle', key: 'controle', width: 14 },
-    { header: 'Anomalies', key: 'anomalies', width: 36 },
+    { key: 'date', width: 12 },
+    { key: 'employe', width: 22 },
+    { key: 'chantier', width: 24 },
+    { key: 'arrivee', width: 10 },
+    { key: 'pauseDebut', width: 12 },
+    { key: 'pauseFin', width: 10 },
+    { key: 'depart', width: 10 },
+    { key: 'tempsPause', width: 12 },
+    { key: 'tempsTravaille', width: 14 },
+    { key: 'heuresDecimales', width: 15 },
+    { key: 'etat', width: 12 },
+    { key: 'distance', width: 13 },
+    { key: 'precision', width: 13 },
+    { key: 'controle', width: 13 },
+    { key: 'anomalies', width: 34 },
   ]
-  styleHeaderRow(sheet.getRow(1))
+  applyPrintSetup(sheet, 'landscape')
+  writeSectionHeader(sheet, 'O', 'Détail des pointages', period)
+  sheet.addRow([])
+
+  const headerRow = sheet.addRow({
+    date: 'Date',
+    employe: 'Employé',
+    chantier: 'Chantier',
+    arrivee: 'Arrivée',
+    pauseDebut: 'Début pause',
+    pauseFin: 'Fin pause',
+    depart: 'Départ',
+    tempsPause: 'Temps pause',
+    tempsTravaille: 'Temps travaillé',
+    heuresDecimales: 'Heures décimales',
+    etat: 'État',
+    distance: 'Distance GPS',
+    precision: 'Précision GPS',
+    controle: 'Contrôle',
+    anomalies: 'Anomalies',
+  })
+  styleHeaderRow(headerRow)
 
   for (const row of rows) {
-    sheet.addRow({
+    const excelRow = sheet.addRow({
       date: formatDate(row.arriveeIso),
       employe: row.employeName,
       chantier: row.chantierName,
@@ -222,20 +420,30 @@ function addDetailSheet(workbook: ExcelJS.Workbook, rows: ExportRow[]): void {
       pauseDebut: row.pauseDebutIso ? formatTime(row.pauseDebutIso) : '',
       pauseFin: row.pauseFinIso ? formatTime(row.pauseFinIso) : '',
       depart: row.departIso ? formatTime(row.departIso) : '',
-      tempsPause: minutesToDecimalHours(row.pauseMinutes),
-      tempsTravaille: minutesToDecimalHours(row.workedMinutes),
+      tempsPause: formatHoursReadable(row.pauseMinutes),
+      tempsTravaille: formatHoursReadable(row.workedMinutes),
+      heuresDecimales: minutesToDecimalHours(row.workedMinutes),
       etat: row.etat,
       distance: row.arriveeDistanceM != null ? Math.round(row.arriveeDistanceM) : '',
       precision: row.arriveeAccuracyM != null ? Math.round(row.arriveeAccuracyM) : '',
       controle: row.anomalies.length === 0 ? 'Conforme' : 'À vérifier',
       anomalies: row.anomalies.map((a) => a.label).join(' · '),
     })
+    styleDataRow(excelRow, [8, 9, 10, 12, 13])
+
+    const etatCellColor = etatColor(row.etat)
+    if (etatCellColor) excelRow.getCell(11).font = { color: { argb: etatCellColor }, bold: true }
+    excelRow.getCell(14).font = {
+      color: { argb: row.anomalies.length === 0 ? SUCCESS_TEXT : DANGER_TEXT },
+      bold: row.anomalies.length > 0,
+    }
   }
 
-  sheet.getColumn('tempsPause').numFmt = HOURS_FORMAT
-  sheet.getColumn('tempsTravaille').numFmt = HOURS_FORMAT
-  sheet.views = [{ state: 'frozen', ySplit: 1 }]
-  sheet.autoFilter = 'A1:N1'
+  sheet.getColumn('heuresDecimales').numFmt = HOURS_FORMAT
+  sheet.getColumn('distance').numFmt = '0" m"'
+  sheet.getColumn('precision').numFmt = '0" m"'
+  sheet.views = [{ state: 'frozen', ySplit: 4 }]
+  sheet.autoFilter = 'A4:O4'
 }
 
 // ----------------------------------------------------------------------------
@@ -262,7 +470,7 @@ function anomalyDetail(anomaly: ExportAnomaly, row: ExportRow, chantier: Chantie
       return 'Le chantier ne possède pas de coordonnées GPS.'
     case 'duree-max-depassee':
       return chantier?.duree_max_intervention_minutes != null
-        ? `Durée maximale configurée : ${minutesToDecimalHours(chantier.duree_max_intervention_minutes)} h`
+        ? `Durée maximale configurée : ${formatHoursReadable(chantier.duree_max_intervention_minutes)}`
         : ''
     case 'depart-manquant':
       return 'Aucun départ enregistré depuis l’arrivée.'
@@ -273,24 +481,42 @@ function anomalyDetail(anomaly: ExportAnomaly, row: ExportRow, chantier: Chantie
   }
 }
 
-function addAnomaliesSheet(workbook: ExcelJS.Workbook, rows: ExportRow[], chantierById: Map<string, Chantier>): void {
+function addAnomaliesSheet(
+  workbook: ExcelJS.Workbook,
+  period: ExportPeriod,
+  rows: ExportRow[],
+  chantierById: Map<string, Chantier>,
+): void {
   const sheet = workbook.addWorksheet('Anomalies')
   sheet.columns = [
-    { header: 'Date', key: 'date', width: 12 },
-    { header: 'Employé', key: 'employe', width: 24 },
-    { header: 'Chantier', key: 'chantier', width: 26 },
-    { header: "Type d’anomalie", key: 'type', width: 22 },
-    { header: 'Détail', key: 'detail', width: 42 },
-    { header: 'Arrivée', key: 'arrivee', width: 10 },
-    { header: 'Départ', key: 'depart', width: 10 },
+    { key: 'date', width: 12 },
+    { key: 'employe', width: 22 },
+    { key: 'chantier', width: 24 },
+    { key: 'type', width: 22 },
+    { key: 'detail', width: 42 },
+    { key: 'arrivee', width: 10 },
+    { key: 'depart', width: 10 },
   ]
-  styleHeaderRow(sheet.getRow(1))
+  applyPrintSetup(sheet, 'landscape')
+  writeSectionHeader(sheet, 'G', 'Anomalies', period)
+  sheet.addRow([])
+
+  const headerRow = sheet.addRow({
+    date: 'Date',
+    employe: 'Employé',
+    chantier: 'Chantier',
+    type: "Type d’anomalie",
+    detail: 'Détail',
+    arrivee: 'Arrivée',
+    depart: 'Départ',
+  })
+  styleHeaderRow(headerRow)
 
   let anomalyRowCount = 0
   for (const row of rows) {
     for (const anomaly of row.anomalies) {
       anomalyRowCount += 1
-      sheet.addRow({
+      const excelRow = sheet.addRow({
         date: formatDate(row.arriveeIso),
         employe: row.employeName,
         chantier: row.chantierName,
@@ -299,18 +525,21 @@ function addAnomaliesSheet(workbook: ExcelJS.Workbook, rows: ExportRow[], chanti
         arrivee: formatTime(row.arriveeIso),
         depart: row.departIso ? formatTime(row.departIso) : '',
       })
+      styleDataRow(excelRow)
+      excelRow.getCell(4).font = { color: { argb: DANGER_TEXT }, bold: true }
     }
   }
 
   if (anomalyRowCount === 0) {
-    sheet.mergeCells('A2:G2')
-    const cell = sheet.getCell('A2')
+    sheet.mergeCells('A5:G5')
+    const cell = sheet.getCell('A5')
     cell.value = 'Aucune anomalie sur la période.'
-    cell.font = { italic: true, color: { argb: SUCCESS_FONT } }
+    cell.font = { italic: true, size: 12, color: { argb: SUCCESS_TEXT } }
     cell.alignment = { horizontal: 'center' }
+    sheet.getRow(5).height = 24
   } else {
-    sheet.views = [{ state: 'frozen', ySplit: 1 }]
-    sheet.autoFilter = 'A1:G1'
+    sheet.views = [{ state: 'frozen', ySplit: 4 }]
+    sheet.autoFilter = 'A4:G4'
   }
 }
 
@@ -322,6 +551,14 @@ export interface BuildXlsxParams {
   rows: ExportRow[]
   chantierById: Map<string, Chantier>
   period: ExportPeriod
+  /**
+   * Nom de l'entreprise affiché en en-tête de la feuille Synthèse.
+   * L'app n'expose aujourd'hui aucune donnée "organisation" fiable côté
+   * export — ce paramètre reste optionnel (repli sur "PointageChantier")
+   * pour qu'un futur écran de paramétrage entreprise puisse l'alimenter
+   * sans modifier à nouveau ce module.
+   */
+  organizationName?: string
 }
 
 function downloadBlob(filename: string, blob: Blob): void {
@@ -342,7 +579,8 @@ function downloadBlob(filename: string, blob: Blob): void {
  * et agrégation d'affichage). Fonction pure, testable hors navigateur.
  */
 export function buildWorkbook(params: BuildXlsxParams): ExcelJS.Workbook {
-  const { rows, chantierById, period } = params
+  const { rows, chantierById, period, organizationName } = params
+  const orgName = organizationName?.trim() || DEFAULT_ORG_NAME
 
   const workbook = new ExcelJS.Workbook()
   workbook.creator = 'PointageChantier'
@@ -352,11 +590,11 @@ export function buildWorkbook(params: BuildXlsxParams): ExcelJS.Workbook {
   const byEmploye = summarizeRowsByEmploye(rows)
   const byChantier = summarizeRowsByChantier(rows)
 
-  addSyntheseSheet(workbook, period, totals, byEmploye)
+  addSyntheseSheet(workbook, period, totals, byEmploye, orgName)
   addParSalarieSheet(workbook, period, totals, byEmploye)
-  addParChantierSheet(workbook, totals, byChantier)
-  addDetailSheet(workbook, rows)
-  addAnomaliesSheet(workbook, rows, chantierById)
+  addParChantierSheet(workbook, period, totals, byChantier)
+  addDetailSheet(workbook, period, rows)
+  addAnomaliesSheet(workbook, period, rows, chantierById)
 
   return workbook
 }

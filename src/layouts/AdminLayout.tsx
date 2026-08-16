@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { to: '/chantiers', label: 'Chantiers', icon: HardHat },
   { to: '/employes', label: 'Employés', icon: Users },
   { to: '/suivi-chantier', label: 'Suivi chantier', icon: Camera },
+  { to: '/exports', label: 'Exports', icon: Download },
 ]
 
 export function AdminLayout() {
@@ -62,16 +63,6 @@ export function AdminLayout() {
           {NAV_ITEMS.map((item) => (
             <SidebarNavItem key={item.to} to={item.to} label={item.label} icon={item.icon} />
           ))}
-          <button
-            type="button"
-            className="sidebar-nav-item disabled"
-            disabled
-            title="Fonctionnalité à venir"
-          >
-            <Download size={18} />
-            <span>Export CSV</span>
-            <span className="sidebar-nav-item-badge">bientôt</span>
-          </button>
         </nav>
 
         <div className="sidebar-footer">

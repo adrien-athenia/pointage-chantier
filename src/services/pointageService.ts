@@ -65,6 +65,42 @@ export async function listPointagesWithRelations(
   return { data: (data ?? []) as unknown as PointageWithRelations[], error: null }
 }
 
+export interface ExportPointageFilters {
+  employeId?: string
+  chantierId?: string
+}
+
+// Volontairement généreuse et non filtrée par date côté serveur : comme
+// EmployeePage (POINTAGES_FETCH_LIMIT), on récupère l'historique large
+// puis on reconstruit les interventions avec buildInterventions() avant
+// de ne garder que celles dont l'arrivée tombe dans la période demandée
+// — un filtre `pointe_at >= debut` côté requête risquerait de couper une
+// séquence arrivée/pause/départ à cheval sur la borne et de fausser les
+// totaux exportés. Un export reste une action ponctuelle admin, pas un
+// chemin chaud : le coût d'une requête plus large est acceptable.
+const EXPORT_FETCH_LIMIT = 20000
+
+export async function listPointagesForExport(
+  filters: ExportPointageFilters = {},
+): Promise<ServiceResult<PointageWithRelations[]>> {
+  let query = supabase.from('pointages').select(RELATIONS_SELECT_ADMIN).order('pointe_at', { ascending: true })
+
+  if (filters.employeId) {
+    query = query.eq('employe_id', filters.employeId)
+  }
+  if (filters.chantierId) {
+    query = query.eq('chantier_id', filters.chantierId)
+  }
+
+  const { data, error } = await query.limit(EXPORT_FETCH_LIMIT)
+
+  if (error) {
+    return { data: [], error: error.message }
+  }
+
+  return { data: (data ?? []) as unknown as PointageWithRelations[], error: null }
+}
+
 export async function listAllPointages(limit = 500): Promise<ServiceResult<Pointage[]>> {
   const { data, error } = await supabase
     .from('pointages')

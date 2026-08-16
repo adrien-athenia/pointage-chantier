@@ -9,6 +9,7 @@ import { PointagesPage } from './pages/PointagesPage'
 import { ChantiersPage } from './pages/ChantiersPage'
 import { EmployesPage } from './pages/EmployesPage'
 import { SuiviChantierPage } from './pages/SuiviChantierPage'
+import { ExportsPage } from './pages/ExportsPage'
 import { EmployeePage } from './pages/EmployeePage'
 import { NotFoundPage } from './pages/NotFoundPage'
 
@@ -33,6 +34,7 @@ function App() {
           <Route path="/chantiers" element={<ChantiersPage />} />
           <Route path="/employes" element={<EmployesPage />} />
           <Route path="/suivi-chantier" element={<SuiviChantierPage />} />
+          <Route path="/exports" element={<ExportsPage />} />
         </Route>
 
         {/* Employe */}

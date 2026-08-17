@@ -200,25 +200,6 @@ function writeKpiBand(sheet: ExcelJS.Worksheet, startRow: number, totals: Return
   return startRow + 2
 }
 
-/**
- * Règle de mise en forme conditionnelle "barre de données" — le graphique
- * natif le plus proche de ce qu'ExcelJS sait produire (voir l'audit dans
- * addDashboardSheet ci-dessous). `color` n'est pas listé dans les types
- * ExcelJS publiés mais est bien lu à l'exécution par DatabarXform — d'où
- * le cast.
- */
-function dataBarRule(colorArgb: string): ExcelJS.DataBarRuleType {
-  return {
-    type: 'dataBar',
-    priority: 1,
-    gradient: false,
-    border: false,
-    showValue: true,
-    cfvo: [{ type: 'min' }, { type: 'max' }],
-    color: { argb: colorArgb },
-  } as ExcelJS.DataBarRuleType
-}
-
 interface LabeledValue {
   label: string
   value: number
@@ -254,64 +235,121 @@ function summarizeAnomaliesByType(rows: ExportRow[]): LabeledValue[] {
   return [...map.entries()].map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value)
 }
 
+/** 0 → 'A', 1 → 'B', ... — suffisant pour les grilles de ce fichier (toujours < 26 colonnes). */
+function colLetter(index0: number): string {
+  return String.fromCharCode(65 + index0)
+}
+
 /**
- * Écrit une section "graphique" (titre + tableau à 2 colonnes + barre de
- * données Excel native sur la colonne de valeurs) et renvoie le numéro de
- * ligne suivant disponible. `emptyMessage` s'affiche à la place du
- * tableau si `entries` est vide (ex. aucune anomalie sur la période).
+ * 5 cartes KPI larges (2 colonnes chacune sur une grille à 10 colonnes) :
+ * intitulé petit en haut, valeur large en dessous, fond et bordure
+ * partagés pour un effet "carte" cohérent — remplace, pour la seule feuille
+ * Dashboard, l'ancien bandeau étroit de writeKpiBand (conservé tel quel
+ * pour Synthèse, qui reste sur sa grille à 6 colonnes existante).
  */
-function writeBarSection(
-  sheet: ExcelJS.Worksheet,
-  startRow: number,
-  title: string,
-  columnLabels: [string, string],
-  entries: LabeledValue[],
-  barColorArgb: string,
-  valueNumFmt: string,
-  emptyMessage?: string,
-): number {
-  let row = startRow
+function writeDashboardKpiCards(sheet: ExcelJS.Worksheet, labelRow: number, totals: ReturnType<typeof computeExportTotals>): void {
+  const cards: Array<{ label: string; value: string | number; danger?: boolean }> = [
+    { label: 'Employés', value: totals.employeCount },
+    { label: 'Chantiers', value: totals.chantierCount },
+    { label: 'Interventions', value: totals.interventionCount },
+    { label: 'Heures travaillées', value: formatHoursReadable(totals.workedMinutes) },
+    { label: 'Anomalies', value: totals.anomalyCount, danger: totals.anomalyCount > 0 },
+  ]
+  const valueRow = labelRow + 1
+  const cardBorderSide = { style: 'thin' as const, color: { argb: BORDER_LIGHT } }
 
-  sheet.mergeCells(`A${row}:F${row}`)
-  const titleCell = sheet.getCell(`A${row}`)
-  titleCell.value = title
-  titleCell.font = { bold: true, size: 13, color: { argb: NAVY } }
-  titleCell.border = { bottom: { style: 'thin', color: { argb: ACCENT_BLUE } } }
-  sheet.getRow(row).height = 22
-  row += 1
+  cards.forEach((card, index) => {
+    const fromLetter = colLetter(index * 2)
+    const toLetter = colLetter(index * 2 + 1)
 
-  if (entries.length === 0) {
-    sheet.mergeCells(`A${row}:F${row}`)
-    const cell = sheet.getCell(`A${row}`)
-    cell.value = emptyMessage ?? '—'
-    cell.font = { italic: true, size: 11, color: { argb: SUCCESS_TEXT } }
-    sheet.getRow(row).height = 20
-    return row + 2
-  }
+    sheet.mergeCells(`${fromLetter}${labelRow}:${toLetter}${labelRow}`)
+    const labelCell = sheet.getCell(`${fromLetter}${labelRow}`)
+    labelCell.value = card.label.toUpperCase()
+    labelCell.font = { bold: true, size: 10, color: { argb: MUTED } }
+    labelCell.alignment = { horizontal: 'center', vertical: 'middle' }
+    labelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND_FILL } }
+    labelCell.border = { top: cardBorderSide, left: cardBorderSide, right: cardBorderSide }
 
-  const headerRow = sheet.getRow(row)
-  headerRow.getCell(1).value = columnLabels[0]
-  headerRow.getCell(2).value = columnLabels[1]
-  styleHeaderRow(headerRow)
-  row += 1
-
-  const dataStartRow = row
-  for (const entry of entries) {
-    const dataRow = sheet.getRow(row)
-    dataRow.getCell(1).value = entry.label
-    dataRow.getCell(2).value = entry.value
-    dataRow.getCell(2).numFmt = valueNumFmt
-    styleDataRow(dataRow, [2])
-    row += 1
-  }
-  const dataEndRow = row - 1
-
-  sheet.addConditionalFormatting({
-    ref: `B${dataStartRow}:B${dataEndRow}`,
-    rules: [dataBarRule(barColorArgb)],
+    sheet.mergeCells(`${fromLetter}${valueRow}:${toLetter}${valueRow}`)
+    const valueCell = sheet.getCell(`${fromLetter}${valueRow}`)
+    valueCell.value = card.value
+    valueCell.font = { bold: true, size: 26, color: { argb: card.danger ? DANGER_TEXT : NAVY } }
+    valueCell.alignment = { horizontal: 'center', vertical: 'middle' }
+    valueCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND_FILL } }
+    valueCell.border = { bottom: cardBorderSide, left: cardBorderSide, right: cardBorderSide }
   })
 
-  return row + 1
+  sheet.getRow(labelRow).height = 20
+  sheet.getRow(valueRow).height = 42
+}
+
+/**
+ * Bloc de synthèse des anomalies du Dashboard : un bandeau total
+ * ("ANOMALIES À CONTRÔLER" + compteur) suivi d'une liste compacte par
+ * type. Plus lisible que l'ancien tableau à barre de données, mais
+ * volontairement plus petit que les blocs graphiques — la feuille
+ * "Anomalies" reste la vue détaillée, ce bloc n'en est qu'un résumé.
+ */
+function writeAnomaliesSummaryBlock(
+  sheet: ExcelJS.Worksheet,
+  startRow: number,
+  totals: ReturnType<typeof computeExportTotals>,
+  anomaliesByType: LabeledValue[],
+): void {
+  const hasAnomalies = totals.anomalyCount > 0
+  const bandArgb = hasAnomalies ? 'FFFBE9E7' : BAND_FILL
+  const borderSide = { style: 'thin' as const, color: { argb: BORDER_LIGHT } }
+
+  let row = startRow
+  sheet.mergeCells(`A${row}:H${row}`)
+  sheet.mergeCells(`I${row}:J${row}`)
+
+  const headerCell = sheet.getCell(`A${row}`)
+  headerCell.value = 'ANOMALIES À CONTRÔLER'
+  headerCell.font = { bold: true, size: 13, color: { argb: NAVY } }
+  headerCell.alignment = { vertical: 'middle', indent: 1 }
+  headerCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bandArgb } }
+  headerCell.border = { top: borderSide, left: borderSide, bottom: borderSide }
+
+  const totalCell = sheet.getCell(`I${row}`)
+  totalCell.value = totals.anomalyCount
+  totalCell.font = { bold: true, size: 20, color: { argb: hasAnomalies ? DANGER_TEXT : SUCCESS_TEXT } }
+  totalCell.alignment = { horizontal: 'center', vertical: 'middle' }
+  totalCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: bandArgb } }
+  totalCell.border = { top: borderSide, right: borderSide, bottom: borderSide }
+
+  sheet.getRow(row).height = 32
+  row += 2
+
+  if (anomaliesByType.length === 0) {
+    sheet.mergeCells(`A${row}:J${row}`)
+    const cell = sheet.getCell(`A${row}`)
+    cell.value = 'Aucune anomalie sur la période.'
+    cell.font = { italic: true, size: 11, color: { argb: SUCCESS_TEXT } }
+    sheet.getRow(row).height = 20
+    return
+  }
+
+  for (const entry of anomaliesByType) {
+    sheet.mergeCells(`A${row}:H${row}`)
+    sheet.mergeCells(`I${row}:J${row}`)
+    const hairline = { style: 'hair' as const, color: { argb: BORDER_LIGHT } }
+
+    const labelCell = sheet.getCell(`A${row}`)
+    labelCell.value = entry.label
+    labelCell.font = { size: 11, color: { argb: NAVY } }
+    labelCell.alignment = { vertical: 'middle', indent: 1 }
+    labelCell.border = { bottom: hairline }
+
+    const valueCell = sheet.getCell(`I${row}`)
+    valueCell.value = entry.value
+    valueCell.font = { bold: true, size: 12, color: { argb: DANGER_TEXT } }
+    valueCell.alignment = { horizontal: 'center', vertical: 'middle' }
+    valueCell.border = { bottom: hairline }
+
+    sheet.getRow(row).height = 20
+    row += 1
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -404,6 +442,11 @@ function donutPercentageLabels(total: number): Plugin<'doughnut'> {
   }
 }
 
+// Toutes les zones graphiques du Dashboard partagent désormais la même
+// taille — "une importance visuelle à peu près égale" pour les 4 blocs.
+const CHART_WIDTH = 470
+const CHART_HEIGHT = 340
+
 /** Heures par salarié — barres horizontales, triées du plus grand au plus petit. */
 function buildHeuresParSalarieChart(entries: LabeledValue[]): string {
   const sorted = [...entries].sort((a, b) => b.value - a.value)
@@ -415,40 +458,47 @@ function buildHeuresParSalarieChart(entries: LabeledValue[]): string {
     },
     options: {
       indexAxis: 'y',
-      layout: { padding: { right: 46, top: 6, bottom: 6 } },
+      layout: { padding: { right: 50, top: 8, bottom: 8 } },
       plugins: { legend: { display: false } },
       scales: {
         x: { beginAtZero: true, grid: { color: CHART_GRID_COLOR }, ticks: { color: argbToCss(MUTED), font: { family: CHART_FONT, size: 10 } } },
-        y: { grid: { display: false }, ticks: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 11, weight: 'bold' } } },
+        y: { grid: { display: false }, ticks: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 12, weight: 'bold' } } },
       },
     },
     plugins: [horizontalBarValueLabels],
   }
-  return renderChartToPngBase64(config, 620, 320)
+  return renderChartToPngBase64(config, CHART_WIDTH, CHART_HEIGHT)
 }
 
-/** Répartition des heures par chantier — anneau, 4 secteurs, légende + pourcentage. */
+/**
+ * Répartition des heures par chantier — anneau, 4 secteurs, pourcentage sur
+ * chaque part, légende à DROITE (pas en bas) : avec des noms de chantier
+ * assez longs, une légende basse pouvait se retrouver pressée contre
+ * l'anneau ou passer sur plusieurs lignes ; à droite, Chart.js réserve une
+ * colonne dédiée à la légende et ne la superpose jamais au dessin.
+ */
 function buildRepartitionChantierChart(entries: LabeledValue[]): string {
   const total = entries.reduce((sum, e) => sum + e.value, 0)
   const config: ChartConfiguration<'doughnut'> = {
     type: 'doughnut',
     data: {
-      labels: entries.map((e) => `${e.label} (${e.value.toFixed(2)} h)`),
+      labels: entries.map((e) => e.label),
       datasets: [{ data: entries.map((e) => e.value), backgroundColor: CHANTIER_PALETTE.map(argbToCss), borderColor: '#FFFFFF', borderWidth: 2 }],
     },
     options: {
-      cutout: '55%',
-      layout: { padding: 10 },
+      cutout: '58%',
+      layout: { padding: 12 },
       plugins: {
         legend: {
-          position: 'bottom',
-          labels: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 10 }, boxWidth: 12, padding: 10 },
+          position: 'right',
+          align: 'center',
+          labels: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 11 }, boxWidth: 13, boxHeight: 13, padding: 14 },
         },
       },
     },
     plugins: [donutPercentageLabels(total)],
   }
-  return renderChartToPngBase64(config, 460, 340)
+  return renderChartToPngBase64(config, CHART_WIDTH, CHART_HEIGHT)
 }
 
 /** Heures par chantier — barres verticales, comparaison directe entre chantiers. */
@@ -460,16 +510,16 @@ function buildHeuresParChantierChart(entries: LabeledValue[]): string {
       datasets: [{ data: entries.map((e) => e.value), backgroundColor: argbToCss(ACCENT_BLUE), borderRadius: 4, barPercentage: 0.55 }],
     },
     options: {
-      layout: { padding: { top: 30, left: 6, right: 6 } },
+      layout: { padding: { top: 34, left: 8, right: 8 } },
       plugins: { legend: { display: false } },
       scales: {
         y: { beginAtZero: true, grid: { color: CHART_GRID_COLOR }, ticks: { color: argbToCss(MUTED), font: { family: CHART_FONT, size: 10 } } },
-        x: { grid: { display: false }, ticks: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 11, weight: 'bold' } } },
+        x: { grid: { display: false }, ticks: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 12, weight: 'bold' } } },
       },
     },
     plugins: [verticalBarValueLabels],
   }
-  return renderChartToPngBase64(config, 460, 320)
+  return renderChartToPngBase64(config, CHART_WIDTH, CHART_HEIGHT)
 }
 
 /** Évolution quotidienne des heures — courbe, une valeur par jour ouvré de la période. */
@@ -484,7 +534,8 @@ function buildEvolutionChart(entries: LabeledValue[]): string {
           borderColor: argbToCss(ACCENT_BLUE),
           backgroundColor: 'rgba(85, 153, 247, 0.12)',
           pointBackgroundColor: argbToCss(NAVY),
-          pointRadius: 3,
+          pointRadius: 4,
+          pointHoverRadius: 4,
           borderWidth: 2,
           fill: true,
           tension: 0.25,
@@ -492,15 +543,18 @@ function buildEvolutionChart(entries: LabeledValue[]): string {
       ],
     },
     options: {
-      layout: { padding: { top: 10, right: 10 } },
+      layout: { padding: { top: 12, right: 14, bottom: 4 } },
       plugins: { legend: { display: false } },
       scales: {
         y: { beginAtZero: true, grid: { color: CHART_GRID_COLOR }, ticks: { color: argbToCss(MUTED), font: { family: CHART_FONT, size: 10 } } },
-        x: { grid: { display: false }, ticks: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 9 } } },
+        x: {
+          grid: { display: false },
+          ticks: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 10 }, maxRotation: 45, minRotation: 45, autoSkip: false },
+        },
       },
     },
   }
-  return renderChartToPngBase64(config, 620, 320)
+  return renderChartToPngBase64(config, CHART_WIDTH, CHART_HEIGHT)
 }
 
 /** Place une image déjà générée (base64 PNG) à une position/taille précises, sans déformation. */
@@ -566,29 +620,33 @@ function addDashboardSheet(
   organizationName: string,
 ): void {
   const sheet = workbook.addWorksheet('Dashboard')
-  sheet.columns = Array.from({ length: 12 }, () => ({ width: 9 }))
+  // Grille à 10 colonnes égales : 5 cartes KPI de 2 colonnes chacune, ou
+  // 2 blocs graphiques de 5 colonnes chacun — un seul pas de grille pour
+  // toute la mise en page, aucun calcul de largeur ad hoc par section.
+  sheet.columns = Array.from({ length: 10 }, () => ({ width: 13 }))
   applyPrintSetup(sheet, 'landscape')
   sheet.views = [{ state: 'normal', showGridLines: false }]
 
-  sheet.mergeCells('A1:L1')
+  sheet.mergeCells('A1:J1')
   const orgCell = sheet.getCell('A1')
   orgCell.value = organizationName
-  orgCell.font = { bold: true, size: 13, color: { argb: NAVY } }
-  sheet.getRow(1).height = 20
+  orgCell.font = { bold: true, size: 12, color: { argb: MUTED } }
+  sheet.getRow(1).height = 18
 
-  sheet.mergeCells('A2:L2')
+  sheet.mergeCells('A2:J2')
   const titleCell = sheet.getCell('A2')
-  titleCell.value = 'Tableau de bord des heures'
-  titleCell.font = { bold: true, size: 20, color: { argb: NAVY } }
-  sheet.getRow(2).height = 30
+  titleCell.value = 'TABLEAU DE BORD DES HEURES'
+  titleCell.font = { bold: true, size: 22, color: { argb: NAVY } }
+  sheet.getRow(2).height = 32
 
-  sheet.getCell('A4').value = 'Période'
-  sheet.getCell('A4').font = { bold: true, size: 10, color: { argb: MUTED } }
-  sheet.mergeCells('A5:D5')
-  sheet.getCell('A5').value = formatPeriodRange(period)
-  sheet.getCell('A5').font = { size: 12, color: { argb: NAVY } }
+  sheet.mergeCells('A3:J3')
+  const periodCell = sheet.getCell('A3')
+  periodCell.value = `Période : ${formatPeriodRange(period)}`
+  periodCell.font = { italic: true, size: 11, color: { argb: MUTED } }
+  sheet.getRow(3).height = 18
 
-  writeKpiBand(sheet, 7, totals)
+  const KPI_LABEL_ROW = 5
+  writeDashboardKpiCards(sheet, KPI_LABEL_ROW, totals)
 
   const byEmployeEntries: LabeledValue[] = byEmploye.map((emp) => ({
     label: emp.employeName,
@@ -601,42 +659,31 @@ function addDashboardSheet(
   const byDayEntries = summarizeRowsByDay(rows)
   const anomaliesByType = summarizeAnomaliesByType(rows)
 
-  // Grille 2×2 : chaque bloc = 1 ligne de titre + 1 image (300 px de haut
-  // ≈ 15 lignes à hauteur par défaut) + 1 ligne d'espacement.
-  const CHART_ROW_SPAN = 17
-  const ROW1 = 10
+  // Grille 2×2 : chaque bloc = 1 ligne de titre + 1 image (340 px de haut
+  // ≈ 17 lignes à hauteur par défaut) + 1 ligne d'espacement.
+  const CHART_ROW_SPAN = 18
+  const ROW1 = KPI_LABEL_ROW + 4 // sous les cartes KPI, avec un espace net
   const ROW2 = ROW1 + CHART_ROW_SPAN
+  const RIGHT_COL = 5
 
   if (byEmployeEntries.length > 0) {
-    writeChartSectionTitle(sheet, ROW1, 'A', 'G', 'Heures par salarié')
-    placeChartImage(workbook, sheet, buildHeuresParSalarieChart(byEmployeEntries), 0, ROW1, 620, 320)
+    writeChartSectionTitle(sheet, ROW1, 'A', 'E', 'Heures par salarié')
+    placeChartImage(workbook, sheet, buildHeuresParSalarieChart(byEmployeEntries), 0, ROW1, CHART_WIDTH, CHART_HEIGHT)
   }
   if (byChantierEntries.length > 0) {
-    writeChartSectionTitle(sheet, ROW1, 'H', 'L', 'Répartition des heures par chantier')
-    placeChartImage(workbook, sheet, buildRepartitionChantierChart(byChantierEntries), 7, ROW1, 460, 340)
+    writeChartSectionTitle(sheet, ROW1, 'F', 'J', 'Répartition des heures par chantier')
+    placeChartImage(workbook, sheet, buildRepartitionChantierChart(byChantierEntries), RIGHT_COL, ROW1, CHART_WIDTH, CHART_HEIGHT)
   }
   if (byChantierEntries.length > 0) {
-    writeChartSectionTitle(sheet, ROW2, 'A', 'G', 'Heures par chantier')
-    placeChartImage(workbook, sheet, buildHeuresParChantierChart(byChantierEntries), 0, ROW2, 460, 320)
+    writeChartSectionTitle(sheet, ROW2, 'A', 'E', 'Heures par chantier')
+    placeChartImage(workbook, sheet, buildHeuresParChantierChart(byChantierEntries), 0, ROW2, CHART_WIDTH, CHART_HEIGHT)
   }
   if (byDayEntries.length > 0) {
-    writeChartSectionTitle(sheet, ROW2, 'H', 'L', 'Évolution des heures')
-    placeChartImage(workbook, sheet, buildEvolutionChart(byDayEntries), 7, ROW2, 460, 320)
+    writeChartSectionTitle(sheet, ROW2, 'F', 'J', 'Évolution des heures')
+    placeChartImage(workbook, sheet, buildEvolutionChart(byDayEntries), RIGHT_COL, ROW2, CHART_WIDTH, CHART_HEIGHT)
   }
 
-  // Bloc anomalies : volontairement compact (tableau + barre de données en
-  // cellule, pas un graphique image) pour ne pas donner autant de place
-  // qu'aux heures.
-  writeBarSection(
-    sheet,
-    ROW2 + CHART_ROW_SPAN,
-    'Anomalies',
-    ["Type d’anomalie", 'Occurrences'],
-    anomaliesByType,
-    DANGER_TEXT,
-    '0',
-    'Aucune anomalie sur la période.',
-  )
+  writeAnomaliesSummaryBlock(sheet, ROW2 + CHART_ROW_SPAN, totals, anomaliesByType)
 }
 
 // ----------------------------------------------------------------------------

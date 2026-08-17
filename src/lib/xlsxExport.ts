@@ -1,4 +1,19 @@
 import ExcelJS from 'exceljs'
+import {
+  BarController,
+  BarElement,
+  CategoryScale,
+  Chart,
+  DoughnutController,
+  ArcElement,
+  LineController,
+  LineElement,
+  Legend,
+  LinearScale,
+  PointElement,
+  type ChartConfiguration,
+  type Plugin,
+} from 'chart.js'
 import type { Chantier } from '../types/database'
 import {
   computeExportTotals,
@@ -11,6 +26,19 @@ import {
   type ExportRow,
 } from './exportData'
 import { formatDate, formatTime } from './formatters'
+
+Chart.register(
+  BarController,
+  BarElement,
+  CategoryScale,
+  DoughnutController,
+  ArcElement,
+  LineController,
+  LineElement,
+  Legend,
+  LinearScale,
+  PointElement,
+)
 
 // ----------------------------------------------------------------------------
 // Identité visuelle — reprend la palette de l'app (tokens.css) : bleu sombre
@@ -31,6 +59,15 @@ const WHITE = 'FFFFFFFF'
 
 const HOURS_FORMAT = '0.00'
 const DEFAULT_ORG_NAME = 'PointageChantier'
+
+/** 'FF5599F7' (ARGB, pour ExcelJS) → '#5599F7' (CSS, pour Chart.js) — mêmes teintes partout, une seule source. */
+function argbToCss(argb: string): string {
+  return `#${argb.slice(2)}`
+}
+
+// 4 nuances de bleu, de sombre à clair — mêmes 4 chantiers que "Par
+// chantier"/Synthèse, jamais plus de 4 couleurs à distinguer.
+const CHANTIER_PALETTE = ['FF1E2F4B', 'FF3D6FB8', 'FF5599F7', 'FFA9C9F5']
 
 const thinBorderSide = { style: 'thin' as const, color: { argb: BORDER_LIGHT } }
 const THIN_BORDER: Partial<ExcelJS.Borders> = {
@@ -278,29 +315,246 @@ function writeBarSection(
 }
 
 // ----------------------------------------------------------------------------
+// Graphiques du Dashboard — rendus en images PNG (Chart.js sur un <canvas>
+// navigateur détaché, aucune dépendance serveur) puis intégrées via
+// workbook.addImage()/worksheet.addImage(), déjà supportés nativement par
+// ExcelJS. Voir l'explication complète (audit + décision) au-dessus de
+// addDashboardSheet.
+// ----------------------------------------------------------------------------
+
+const CHART_FONT = "'Segoe UI', Arial, sans-serif"
+const CHART_GRID_COLOR = '#EAEEF5'
+
+function renderChartToPngBase64(config: ChartConfiguration, widthPx: number, heightPx: number): string {
+  const canvas = document.createElement('canvas')
+  canvas.width = widthPx
+  canvas.height = heightPx
+
+  const chart = new Chart(canvas, {
+    ...config,
+    options: { responsive: false, animation: false, devicePixelRatio: 1, ...config.options },
+  })
+  const dataUrl = canvas.toDataURL('image/png')
+  chart.destroy()
+
+  return dataUrl.slice(dataUrl.indexOf(',') + 1)
+}
+
+/** Libellé "81,98 h" dessiné juste après l'extrémité de chaque barre horizontale. */
+const horizontalBarValueLabels: Plugin<'bar'> = {
+  id: 'horizontalBarValueLabels',
+  afterDatasetsDraw(chart) {
+    const { ctx } = chart
+    const meta = chart.getDatasetMeta(0)
+    const data = chart.data.datasets[0].data as number[]
+    ctx.save()
+    ctx.font = `bold 12px ${CHART_FONT}`
+    ctx.fillStyle = argbToCss(NAVY)
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'middle'
+    meta.data.forEach((element, index) => {
+      const point = element.getProps(['x', 'y'], true)
+      ctx.fillText(`${data[index].toFixed(2)} h`, point.x + 8, point.y)
+    })
+    ctx.restore()
+  },
+}
+
+/** Libellé "81,98 h" dessiné juste au-dessus de chaque barre verticale. */
+const verticalBarValueLabels: Plugin<'bar'> = {
+  id: 'verticalBarValueLabels',
+  afterDatasetsDraw(chart) {
+    const { ctx } = chart
+    const meta = chart.getDatasetMeta(0)
+    const data = chart.data.datasets[0].data as number[]
+    ctx.save()
+    ctx.font = `bold 12px ${CHART_FONT}`
+    ctx.fillStyle = argbToCss(NAVY)
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'bottom'
+    meta.data.forEach((element, index) => {
+      const point = element.getProps(['x', 'y'], true)
+      ctx.fillText(`${data[index].toFixed(2)} h`, point.x, point.y - 6)
+    })
+    ctx.restore()
+  },
+}
+
+/** Libellé "24 %" centré sur chaque secteur du donut. */
+function donutPercentageLabels(total: number): Plugin<'doughnut'> {
+  return {
+    id: 'donutPercentageLabels',
+    afterDatasetsDraw(chart) {
+      const { ctx } = chart
+      const meta = chart.getDatasetMeta(0)
+      const data = chart.data.datasets[0].data as number[]
+      ctx.save()
+      ctx.font = `bold 12px ${CHART_FONT}`
+      ctx.fillStyle = '#FFFFFF'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      meta.data.forEach((element, index) => {
+        if (total <= 0) return
+        const percent = Math.round((data[index] / total) * 100)
+        const pos = element.tooltipPosition(true)
+        ctx.fillText(`${percent}%`, pos.x ?? 0, pos.y ?? 0)
+      })
+      ctx.restore()
+    },
+  }
+}
+
+/** Heures par salarié — barres horizontales, triées du plus grand au plus petit. */
+function buildHeuresParSalarieChart(entries: LabeledValue[]): string {
+  const sorted = [...entries].sort((a, b) => b.value - a.value)
+  const config: ChartConfiguration<'bar'> = {
+    type: 'bar',
+    data: {
+      labels: sorted.map((e) => e.label),
+      datasets: [{ data: sorted.map((e) => e.value), backgroundColor: argbToCss(ACCENT_BLUE), borderRadius: 3, barPercentage: 0.65 }],
+    },
+    options: {
+      indexAxis: 'y',
+      layout: { padding: { right: 46, top: 6, bottom: 6 } },
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { beginAtZero: true, grid: { color: CHART_GRID_COLOR }, ticks: { color: argbToCss(MUTED), font: { family: CHART_FONT, size: 10 } } },
+        y: { grid: { display: false }, ticks: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 11, weight: 'bold' } } },
+      },
+    },
+    plugins: [horizontalBarValueLabels],
+  }
+  return renderChartToPngBase64(config, 620, 320)
+}
+
+/** Répartition des heures par chantier — anneau, 4 secteurs, légende + pourcentage. */
+function buildRepartitionChantierChart(entries: LabeledValue[]): string {
+  const total = entries.reduce((sum, e) => sum + e.value, 0)
+  const config: ChartConfiguration<'doughnut'> = {
+    type: 'doughnut',
+    data: {
+      labels: entries.map((e) => `${e.label} (${e.value.toFixed(2)} h)`),
+      datasets: [{ data: entries.map((e) => e.value), backgroundColor: CHANTIER_PALETTE.map(argbToCss), borderColor: '#FFFFFF', borderWidth: 2 }],
+    },
+    options: {
+      cutout: '55%',
+      layout: { padding: 10 },
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 10 }, boxWidth: 12, padding: 10 },
+        },
+      },
+    },
+    plugins: [donutPercentageLabels(total)],
+  }
+  return renderChartToPngBase64(config, 460, 340)
+}
+
+/** Heures par chantier — barres verticales, comparaison directe entre chantiers. */
+function buildHeuresParChantierChart(entries: LabeledValue[]): string {
+  const config: ChartConfiguration<'bar'> = {
+    type: 'bar',
+    data: {
+      labels: entries.map((e) => e.label),
+      datasets: [{ data: entries.map((e) => e.value), backgroundColor: argbToCss(ACCENT_BLUE), borderRadius: 4, barPercentage: 0.55 }],
+    },
+    options: {
+      layout: { padding: { top: 30, left: 6, right: 6 } },
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, grid: { color: CHART_GRID_COLOR }, ticks: { color: argbToCss(MUTED), font: { family: CHART_FONT, size: 10 } } },
+        x: { grid: { display: false }, ticks: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 11, weight: 'bold' } } },
+      },
+    },
+    plugins: [verticalBarValueLabels],
+  }
+  return renderChartToPngBase64(config, 460, 320)
+}
+
+/** Évolution quotidienne des heures — courbe, une valeur par jour ouvré de la période. */
+function buildEvolutionChart(entries: LabeledValue[]): string {
+  const config: ChartConfiguration<'line'> = {
+    type: 'line',
+    data: {
+      labels: entries.map((e) => e.label),
+      datasets: [
+        {
+          data: entries.map((e) => e.value),
+          borderColor: argbToCss(ACCENT_BLUE),
+          backgroundColor: 'rgba(85, 153, 247, 0.12)',
+          pointBackgroundColor: argbToCss(NAVY),
+          pointRadius: 3,
+          borderWidth: 2,
+          fill: true,
+          tension: 0.25,
+        },
+      ],
+    },
+    options: {
+      layout: { padding: { top: 10, right: 10 } },
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, grid: { color: CHART_GRID_COLOR }, ticks: { color: argbToCss(MUTED), font: { family: CHART_FONT, size: 10 } } },
+        x: { grid: { display: false }, ticks: { color: argbToCss(NAVY), font: { family: CHART_FONT, size: 9 } } },
+      },
+    },
+  }
+  return renderChartToPngBase64(config, 620, 320)
+}
+
+/** Place une image déjà générée (base64 PNG) à une position/taille précises, sans déformation. */
+function placeChartImage(
+  workbook: ExcelJS.Workbook,
+  sheet: ExcelJS.Worksheet,
+  base64: string,
+  tlCol: number,
+  tlRow: number,
+  width: number,
+  height: number,
+): void {
+  const imageId = workbook.addImage({ base64, extension: 'png' })
+  sheet.addImage(imageId, { tl: { col: tlCol, row: tlRow }, ext: { width, height } })
+}
+
+/** Titre de section au-dessus d'un graphique — même style que les autres feuilles (writeBarSection). */
+function writeChartSectionTitle(sheet: ExcelJS.Worksheet, row: number, fromCol: string, toCol: string, title: string): void {
+  sheet.mergeCells(`${fromCol}${row}:${toCol}${row}`)
+  const cell = sheet.getCell(`${fromCol}${row}`)
+  cell.value = title
+  cell.font = { bold: true, size: 13, color: { argb: NAVY } }
+  cell.border = { bottom: { style: 'thin', color: { argb: ACCENT_BLUE } } }
+  sheet.getRow(row).height = 22
+}
+
+// ----------------------------------------------------------------------------
 // Feuille 0 — Dashboard
 // ----------------------------------------------------------------------------
 //
 // AUDIT — graphiques natifs Excel via ExcelJS :
-// ExcelJS (package publié sur npm, version installée ici : 4.4.0) n'expose
-// aucune API de CRÉATION de graphique natif (barres/lignes/secteurs) : sa
-// documentation et son changelog ne mentionnent les "chart" que pour ne pas
-// planter à la LECTURE d'un classeur qui en contient déjà un (issue #466,
-// "Don't break when loading an Excel file containing a chartsheet") — il
-// n'existe pas de `worksheet.addChart(...)` ni d'équivalent. Alternative
-// écartée : générer les graphiques comme IMAGES (ex. via un moteur de rendu
-// canvas côté Node) puis les insérer avec `workbook.addImage` — cette API
-// existe bien dans ExcelJS, mais elle produirait des images figées (donc
-// pas de mise à jour si l'utilisateur trie/filtre le classeur) et
-// ajouterait une dépendance de rendu graphique supplémentaire pour un
-// résultat au final moins fiable qu'une fonctionnalité native.
-// Solution retenue : les "barres de données" (data bars), une mise en
-// forme conditionnelle NATIVE d'Excel (`ConditionalFormattingRule` de type
-// `dataBar`, bien supportée par ExcelJS en écriture) rendent directement
-// dans la cellule une barre proportionnelle à la valeur — un vrai visuel
-// de type graphique, sans dépendance ajoutée, et qui reste un objet Excel
-// natif (donc fiable à l'ouverture, à l'impression et si les données sont
-// filtrées/triées).
+// ExcelJS (version installée ici : 4.4.0) n'expose aucune API de CRÉATION
+// de graphique natif — confirmé par les types publiés et le changelog, qui
+// ne mentionnent les "chart" que pour ne pas planter à la LECTURE d'un
+// classeur qui en contient déjà un. Testé concrètement au-delà de la
+// documentation : un classeur contenant un vrai graphique Excel (créé avec
+// openpyxl, donc strictement conforme au format), rechargé avec CETTE
+// version d'ExcelJS pour y injecter des données (piste "template"),
+// provoque un crash immédiat (`TypeError: Cannot read properties of
+// undefined (reading 'anchors')`, dans XLSX.reconcile) : son parseur de
+// dessins ne sait traiter que les ancres d'images, pas les ancres de
+// graphique. La piste "template + injection" est donc IMPOSSIBLE avec cette
+// bibliothèque, pas seulement risquée. Écrire à la main le XML OOXML du
+// graphique aurait été la seule voie vers un vrai graphique dynamique, mais
+// c'est précisément le type de solution fragile à risque de corruption
+// qu'il fallait éviter.
+// Solution retenue (validée explicitement) : les graphiques sont rendus en
+// images PNG via Chart.js sur un <canvas> du navigateur (aucune dépendance
+// serveur, aucun paquet natif), puis intégrées avec `workbook.addImage` /
+// `worksheet.addImage` — une fonctionnalité qu'ExcelJS supporte réellement
+// (vérifié par un aller-retour lecture/écriture réel, sans erreur). Ce sont
+// donc des images fidèles aux données de l'export au moment de la
+// génération, pas des objets Excel qui se recalculent si l'utilisateur
+// modifie une cellule ensuite.
 
 function addDashboardSheet(
   workbook: ExcelJS.Workbook,
@@ -312,19 +566,19 @@ function addDashboardSheet(
   organizationName: string,
 ): void {
   const sheet = workbook.addWorksheet('Dashboard')
-  sheet.columns = [{ width: 28 }, { width: 17 }, { width: 17 }, { width: 15 }, { width: 13 }, { width: 13 }]
-  applyPrintSetup(sheet, 'portrait')
+  sheet.columns = Array.from({ length: 12 }, () => ({ width: 9 }))
+  applyPrintSetup(sheet, 'landscape')
   sheet.views = [{ state: 'normal', showGridLines: false }]
 
-  sheet.mergeCells('A1:F1')
+  sheet.mergeCells('A1:L1')
   const orgCell = sheet.getCell('A1')
   orgCell.value = organizationName
   orgCell.font = { bold: true, size: 13, color: { argb: NAVY } }
   sheet.getRow(1).height = 20
 
-  sheet.mergeCells('A2:F2')
+  sheet.mergeCells('A2:L2')
   const titleCell = sheet.getCell('A2')
-  titleCell.value = 'Dashboard'
+  titleCell.value = 'Tableau de bord des heures'
   titleCell.font = { bold: true, size: 20, color: { argb: NAVY } }
   sheet.getRow(2).height = 30
 
@@ -334,28 +588,48 @@ function addDashboardSheet(
   sheet.getCell('A5').value = formatPeriodRange(period)
   sheet.getCell('A5').font = { size: 12, color: { argb: NAVY } }
 
-  let row = writeKpiBand(sheet, 7, totals)
-  row += 1 // ligne vide après le bandeau KPI
+  writeKpiBand(sheet, 7, totals)
 
   const byEmployeEntries: LabeledValue[] = byEmploye.map((emp) => ({
     label: emp.employeName,
     value: minutesToDecimalHours(emp.workedMinutes),
   }))
-  row = writeBarSection(sheet, row, 'Heures par salarié', ['Employé', 'Heures travaillées (h)'], byEmployeEntries, ACCENT_BLUE, HOURS_FORMAT)
-
   const byChantierEntries: LabeledValue[] = byChantier.map((chantier) => ({
     label: chantier.chantierName,
     value: minutesToDecimalHours(chantier.workedMinutes),
   }))
-  row = writeBarSection(sheet, row, 'Heures par chantier', ['Chantier', 'Heures travaillées (h)'], byChantierEntries, ACCENT_BLUE, HOURS_FORMAT)
-
   const byDayEntries = summarizeRowsByDay(rows)
-  row = writeBarSection(sheet, row, 'Évolution des heures par jour', ['Date', 'Heures travaillées (h)'], byDayEntries, ACCENT_BLUE, HOURS_FORMAT)
-
   const anomaliesByType = summarizeAnomaliesByType(rows)
+
+  // Grille 2×2 : chaque bloc = 1 ligne de titre + 1 image (300 px de haut
+  // ≈ 15 lignes à hauteur par défaut) + 1 ligne d'espacement.
+  const CHART_ROW_SPAN = 17
+  const ROW1 = 10
+  const ROW2 = ROW1 + CHART_ROW_SPAN
+
+  if (byEmployeEntries.length > 0) {
+    writeChartSectionTitle(sheet, ROW1, 'A', 'G', 'Heures par salarié')
+    placeChartImage(workbook, sheet, buildHeuresParSalarieChart(byEmployeEntries), 0, ROW1, 620, 320)
+  }
+  if (byChantierEntries.length > 0) {
+    writeChartSectionTitle(sheet, ROW1, 'H', 'L', 'Répartition des heures par chantier')
+    placeChartImage(workbook, sheet, buildRepartitionChantierChart(byChantierEntries), 7, ROW1, 460, 340)
+  }
+  if (byChantierEntries.length > 0) {
+    writeChartSectionTitle(sheet, ROW2, 'A', 'G', 'Heures par chantier')
+    placeChartImage(workbook, sheet, buildHeuresParChantierChart(byChantierEntries), 0, ROW2, 460, 320)
+  }
+  if (byDayEntries.length > 0) {
+    writeChartSectionTitle(sheet, ROW2, 'H', 'L', 'Évolution des heures')
+    placeChartImage(workbook, sheet, buildEvolutionChart(byDayEntries), 7, ROW2, 460, 320)
+  }
+
+  // Bloc anomalies : volontairement compact (tableau + barre de données en
+  // cellule, pas un graphique image) pour ne pas donner autant de place
+  // qu'aux heures.
   writeBarSection(
     sheet,
-    row,
+    ROW2 + CHART_ROW_SPAN,
     'Anomalies',
     ["Type d’anomalie", 'Occurrences'],
     anomaliesByType,

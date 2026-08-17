@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "dev:demo": "vite --mode demo",
     "build:demo": "tsc -b && vite build --mode demo",
-    "seed:demo": "tsx scripts/seed-demo.ts"
+    "seed:demo": "tsx scripts/seed-demo.ts",
+    "seed:demo:pointages": "tsx scripts/seed-demo-pointages.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.2",

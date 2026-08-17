@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
@@ -22,13 +22,14 @@ import { listChantiers } from '../services/chantierService'
 import { listAllProfiles } from '../services/employeService'
 import { listAllPointages } from '../services/pointageService'
 import {
+  buildPeriodInterventions,
   computeChantierTodaySummaries,
   computeEmployeeDayStatuses,
   type EmployeeDayStatus,
   type EmployeeDayStatusKind,
 } from '../lib/pointageStats'
 import { computeAnomalies, ACCURACY_THRESHOLD_M } from '../lib/anomalies'
-import { formatMinutes, formatDate, formatTime, isSameDay } from '../lib/formatters'
+import { formatMinutes, formatDate, formatTime, isSameDay, startOfLocalDay, startOfLocalMonth } from '../lib/formatters'
 import type { Chantier, Pointage, PointageType, Profile } from '../types/database'
 
 interface DashboardState {
@@ -45,6 +46,7 @@ interface DashboardState {
 const PRESENCE_DISPLAY_LIMIT = 6
 const CHANTIERS_DISPLAY_LIMIT = 5
 const ANOMALIES_DISPLAY_LIMIT = 5
+const ACTIVITY_DISPLAY_LIMIT = 8
 // Rafraîchit les statuts dérivés (présence, anomalies liées à la durée
 // max...) sans repasser par Supabase : Date.now() seul suffit à faire
 // avancer "depuis 12:04" et la détection "durée max dépassée".
@@ -68,6 +70,40 @@ const STATUS_LABEL: Record<EmployeeDayStatusKind, string> = {
 // concernés par la journée en cours d'abord (présent/pause à égalité),
 // puis journée terminée, puis pas encore pointé.
 const STATUS_ORDER: Record<EmployeeDayStatusKind, number> = { present: 0, pause: 0, termine: 1, absent: 2 }
+
+// ----------------------------------------------------------------------------
+// Sélecteur de période — "Aujourd'hui" reproduit exactement le
+// fonctionnement historique de la page (temps réel, interventions
+// ouvertes) ; les deux autres options réutilisent buildPeriodInterventions
+// (basé sur buildInterventions/computeLiveMinutes, comme partout ailleurs).
+// ----------------------------------------------------------------------------
+
+type PeriodKey = 'today' | '7days' | 'month'
+
+const PERIOD_OPTIONS: Array<{ key: PeriodKey; label: string }> = [
+  { key: 'today', label: 'Aujourd’hui' },
+  { key: '7days', label: '7 derniers jours' },
+  { key: 'month', label: 'Ce mois' },
+]
+
+// Le fetch par défaut (500, au montage) suffit largement pour "Aujourd'hui" —
+// inchangé. Les deux périodes plus larges ne redemandent Supabase qu'au
+// moment où l'utilisateur les sélectionne réellement (voir l'effet dédié),
+// avec une limite dimensionnée à ce qu'elles couvrent.
+const PERIOD_FETCH_LIMIT: Record<PeriodKey, number> = { today: 500, '7days': 1500, month: 5000 }
+
+function resolvePeriodRange(period: PeriodKey, nowMs: number): { startMs: number; endMs: number } {
+  const now = new Date(nowMs)
+  if (period === 'today') {
+    return { startMs: startOfLocalDay(now).getTime(), endMs: nowMs }
+  }
+  if (period === '7days') {
+    const sixDaysAgo = new Date(now)
+    sixDaysAgo.setDate(sixDaysAgo.getDate() - 6)
+    return { startMs: startOfLocalDay(sixDaysAgo).getTime(), endMs: nowMs }
+  }
+  return { startMs: startOfLocalMonth(now).getTime(), endMs: nowMs }
+}
 
 /**
  * Contrôle GPS d'UN pointage précis (et non de toute l'intervention comme
@@ -128,11 +164,14 @@ export function DashboardPage() {
     pointages: [],
   })
   const [nowTick, setNowTick] = useState(() => Date.now())
+  const [period, setPeriod] = useState<PeriodKey>('today')
+  const [periodLoading, setPeriodLoading] = useState(false)
+  const fetchedLimitRef = useRef(PERIOD_FETCH_LIMIT.today)
 
   useEffect(() => {
     let isMounted = true
 
-    Promise.all([listChantiers(), listAllProfiles(), listAllPointages(500)]).then(
+    Promise.all([listChantiers(), listAllProfiles(), listAllPointages(PERIOD_FETCH_LIMIT.today)]).then(
       ([chantiersRes, profilesRes, pointagesRes]) => {
         if (!isMounted) return
         setState({
@@ -150,6 +189,29 @@ export function DashboardPage() {
     }
   }, [])
 
+  // N'agrandit le fetch que si la période choisie dépasse ce qui est déjà
+  // chargé (ex. "Ce mois" après "Aujourd'hui") — jamais au montage, jamais
+  // en revenant à une période plus étroite déjà couverte par les données
+  // en mémoire.
+  useEffect(() => {
+    const requiredLimit = PERIOD_FETCH_LIMIT[period]
+    if (requiredLimit <= fetchedLimitRef.current) return
+
+    let isMounted = true
+    setPeriodLoading(true)
+
+    listAllPointages(requiredLimit).then((res) => {
+      if (!isMounted) return
+      fetchedLimitRef.current = requiredLimit
+      setState((prev) => ({ ...prev, pointages: res.data, error: res.error ?? prev.error }))
+      setPeriodLoading(false)
+    })
+
+    return () => {
+      isMounted = false
+    }
+  }, [period])
+
   useEffect(() => {
     const id = setInterval(() => setNowTick(Date.now()), CLOCK_TICK_MS)
     return () => clearInterval(id)
@@ -161,6 +223,7 @@ export function DashboardPage() {
   const chantierById = useMemo(() => new Map(chantiers.map((chantier) => [chantier.id, chantier])), [chantiers])
   const employeeProfiles = useMemo(() => profiles.filter((p) => p.role === 'employe'), [profiles])
 
+  // ---- Mode "Aujourd'hui" : fonctionnement temps réel inchangé ----------
   const employeeDayStatuses = useMemo(() => computeEmployeeDayStatuses(pointages, nowTick), [pointages, nowTick])
   const chantierTodaySummaries = useMemo(
     () => computeChantierTodaySummaries(pointages, nowTick),
@@ -208,6 +271,52 @@ export function DashboardPage() {
 
   const derniersPointages = pointages.slice(0, 8)
 
+  // ---- Modes "7 derniers jours" / "Ce mois" : période historique --------
+  const periodRange = useMemo(() => resolvePeriodRange(period, nowTick), [period, nowTick])
+  const periodInterventions = useMemo(
+    () => buildPeriodInterventions(pointages, periodRange.startMs, periodRange.endMs, nowTick),
+    [pointages, periodRange, nowTick],
+  )
+
+  const periodWorkedMinutes = periodInterventions.reduce((sum, item) => sum + item.workedMinutes, 0)
+  const periodEmployeeIds = new Set(periodInterventions.map((item) => item.employeId))
+  const periodChantierIds = new Set(periodInterventions.map((item) => item.chantierId))
+  const periodLabel = PERIOD_OPTIONS.find((option) => option.key === period)?.label ?? ''
+
+  const employeeActivity = useMemo(() => {
+    const map = new Map<string, { workedMinutes: number; interventionCount: number }>()
+    for (const item of periodInterventions) {
+      const entry = map.get(item.employeId) ?? { workedMinutes: 0, interventionCount: 0 }
+      entry.workedMinutes += item.workedMinutes
+      entry.interventionCount += 1
+      map.set(item.employeId, entry)
+    }
+    return [...map.entries()]
+      .map(([employeId, stats]) => ({
+        employeId,
+        employeName: profileById.get(employeId)?.full_name || profileById.get(employeId)?.email || 'Employé',
+        ...stats,
+      }))
+      .sort((a, b) => b.workedMinutes - a.workedMinutes)
+  }, [periodInterventions, profileById])
+
+  const chantierActivity = useMemo(() => {
+    const map = new Map<string, { workedMinutes: number; interventionCount: number }>()
+    for (const item of periodInterventions) {
+      const entry = map.get(item.chantierId) ?? { workedMinutes: 0, interventionCount: 0 }
+      entry.workedMinutes += item.workedMinutes
+      entry.interventionCount += 1
+      map.set(item.chantierId, entry)
+    }
+    return [...map.entries()]
+      .map(([chantierId, stats]) => ({
+        chantierId,
+        chantierName: chantierById.get(chantierId)?.nom ?? 'Chantier inconnu',
+        ...stats,
+      }))
+      .sort((a, b) => b.workedMinutes - a.workedMinutes)
+  }, [periodInterventions, chantierById])
+
   const columns: ResponsiveTableColumn<Pointage>[] = [
     {
       key: 'employe',
@@ -254,9 +363,26 @@ export function DashboardPage() {
     },
   ]
 
+  const isToday = period === 'today'
+
   return (
     <div>
       <PageHeader title="Tableau de bord" subtitle="Vue d’ensemble de l’activité terrain" />
+
+      <div className="preset-group card-section-gap">
+        {PERIOD_OPTIONS.map((option) => (
+          <Button
+            key={option.key}
+            type="button"
+            size="sm"
+            variant={period === option.key ? 'primary' : 'secondary'}
+            disabled={periodLoading}
+            onClick={() => setPeriod(option.key)}
+          >
+            {option.label}
+          </Button>
+        ))}
+      </div>
 
       {error && (
         <p className="error-banner">
@@ -265,122 +391,199 @@ export function DashboardPage() {
         </p>
       )}
 
-      {loading ? (
+      {loading || periodLoading ? (
         <div className="loading-block">Chargement…</div>
       ) : (
         <>
-          <div className="stat-grid">
-            <StatCard label="Heures aujourd'hui" value={formatMinutes(heuresAujourdhuiMinutes)} icon={Clock} />
-            <StatCard label="Pointages aujourd'hui" value={String(pointagesToday)} icon={ListChecks} />
-            <StatCard label="Employés présents" value={`${presentCount} / ${employeeProfiles.length}`} icon={Users} />
-            <StatCard label="Chantiers actifs" value={String(chantiersActifsCount)} icon={HardHat} />
-          </div>
+          {isToday ? (
+            <div className="stat-grid">
+              <StatCard label="Heures aujourd'hui" value={formatMinutes(heuresAujourdhuiMinutes)} icon={Clock} />
+              <StatCard label="Pointages aujourd'hui" value={String(pointagesToday)} icon={ListChecks} />
+              <StatCard label="Employés présents" value={`${presentCount} / ${employeeProfiles.length}`} icon={Users} />
+              <StatCard label="Chantiers actifs" value={String(chantiersActifsCount)} icon={HardHat} />
+            </div>
+          ) : (
+            <div className="stat-grid">
+              <StatCard label={`Heures — ${periodLabel}`} value={formatMinutes(periodWorkedMinutes)} icon={Clock} />
+              <StatCard label={`Interventions — ${periodLabel}`} value={String(periodInterventions.length)} icon={ListChecks} />
+              <StatCard
+                label={`Employés actifs — ${periodLabel}`}
+                value={`${periodEmployeeIds.size} / ${employeeProfiles.length}`}
+                icon={Users}
+              />
+              <StatCard label={`Chantiers concernés — ${periodLabel}`} value={String(periodChantierIds.size)} icon={HardHat} />
+            </div>
+          )}
 
-          <div className="dashboard-grid">
-            <Card>
-              <div className="card-header">
-                <h2 className="card-title">Présence aujourd'hui</h2>
-              </div>
-              {employeeProfiles.length === 0 ? (
-                <EmptyState
-                  icon={Users}
-                  title="Aucun employé"
-                  description="Ajoutez des employés pour suivre leur présence."
-                />
-              ) : (
-                <>
-                  <div className="presence-list">
-                    {presenceRows.map((profile) => (
-                      <PresenceRow key={profile.id} profile={profile} status={employeeDayStatuses.get(profile.id)} />
-                    ))}
-                  </div>
-                  {employeeProfiles.length > PRESENCE_DISPLAY_LIMIT && (
-                    <div className="dashboard-card-footer">
-                      <Button variant="ghost" size="sm" icon={<ArrowRight size={16} />} onClick={() => navigate('/employes')}>
-                        Voir tous les employés
-                      </Button>
-                    </div>
-                  )}
-                </>
-              )}
-            </Card>
-
-            <Card>
-              <div className="card-header">
-                <h2 className="card-title">Chantiers aujourd'hui</h2>
-              </div>
-              {chantierTodayRows.length === 0 ? (
-                <EmptyState
-                  icon={HardHat}
-                  title="Aucune activité aujourd'hui"
-                  description="Les chantiers avec des pointages aujourd'hui apparaîtront ici."
-                />
-              ) : (
-                <div className="ranking-list">
-                  {chantierTodayRows.map((entry) => (
-                    <div className="ranking-row" key={entry.chantierId}>
-                      <span className="ranking-row-name">{chantierById.get(entry.chantierId)?.nom ?? 'Chantier inconnu'}</span>
-                      <span className="ranking-row-value">
-                        {entry.employeIds.size} employé{entry.employeIds.size > 1 ? 's' : ''} · {formatMinutes(entry.workedMinutes)}
-                      </span>
-                    </div>
-                  ))}
+          {isToday ? (
+            <div className="dashboard-grid">
+              <Card>
+                <div className="card-header">
+                  <h2 className="card-title">Présence aujourd'hui</h2>
                 </div>
-              )}
-              <div className="dashboard-card-footer">
-                <Button variant="ghost" size="sm" icon={<ArrowRight size={16} />} onClick={() => navigate('/chantiers')}>
-                  Voir les chantiers
-                </Button>
-              </div>
-            </Card>
-
-            <Card className="dashboard-grid-full">
-              <div className="card-header">
-                <h2 className="card-title">À vérifier</h2>
-                {anomalyRows.length > 0 && (
-                  <Badge variant="danger">
-                    {anomalyRows.length} anomalie{anomalyRows.length > 1 ? 's' : ''}
-                  </Badge>
+                {employeeProfiles.length === 0 ? (
+                  <EmptyState
+                    icon={Users}
+                    title="Aucun employé"
+                    description="Ajoutez des employés pour suivre leur présence."
+                  />
+                ) : (
+                  <>
+                    <div className="presence-list">
+                      {presenceRows.map((profile) => (
+                        <PresenceRow key={profile.id} profile={profile} status={employeeDayStatuses.get(profile.id)} />
+                      ))}
+                    </div>
+                    {employeeProfiles.length > PRESENCE_DISPLAY_LIMIT && (
+                      <div className="dashboard-card-footer">
+                        <Button variant="ghost" size="sm" icon={<ArrowRight size={16} />} onClick={() => navigate('/employes')}>
+                          Voir tous les employés
+                        </Button>
+                      </div>
+                    )}
+                  </>
                 )}
-              </div>
-              {anomalyRows.length === 0 ? (
-                <div className="check-ok">
-                  <ShieldCheck size={18} />
-                  <span>Aucune anomalie à vérifier</span>
+              </Card>
+
+              <Card>
+                <div className="card-header">
+                  <h2 className="card-title">Chantiers aujourd'hui</h2>
                 </div>
-              ) : (
-                <>
-                  <div className="check-list">
-                    {anomalyRows.map((row) => (
-                      <div className="check-row" key={row.key}>
-                        <span className="check-row-name">{row.employeName}</span>
-                        <span className="check-row-detail">
-                          <AlertTriangle size={13} />
-                          {row.label}
+                {chantierTodayRows.length === 0 ? (
+                  <EmptyState
+                    icon={HardHat}
+                    title="Aucune activité aujourd'hui"
+                    description="Les chantiers avec des pointages aujourd'hui apparaîtront ici."
+                  />
+                ) : (
+                  <div className="ranking-list">
+                    {chantierTodayRows.map((entry) => (
+                      <div className="ranking-row" key={entry.chantierId}>
+                        <span className="ranking-row-name">{chantierById.get(entry.chantierId)?.nom ?? 'Chantier inconnu'}</span>
+                        <span className="ranking-row-value">
+                          {entry.employeIds.size} employé{entry.employeIds.size > 1 ? 's' : ''} · {formatMinutes(entry.workedMinutes)}
                         </span>
                       </div>
                     ))}
                   </div>
-                  <div className="dashboard-card-footer">
-                    <Button variant="ghost" size="sm" icon={<ArrowRight size={16} />} onClick={() => navigate('/pointages')}>
-                      Voir les anomalies
-                    </Button>
-                  </div>
-                </>
-              )}
-            </Card>
+                )}
+                <div className="dashboard-card-footer">
+                  <Button variant="ghost" size="sm" icon={<ArrowRight size={16} />} onClick={() => navigate('/chantiers')}>
+                    Voir les chantiers
+                  </Button>
+                </div>
+              </Card>
 
-            <Card className="dashboard-grid-full">
-              <div className="card-header">
-                <h2 className="card-title">Derniers pointages reçus</h2>
-              </div>
-              {derniersPointages.length === 0 ? (
-                <EmptyState icon={Inbox} title="Aucun pointage" description="Les pointages des employés apparaîtront ici." />
-              ) : (
-                <ResponsiveTable columns={columns} rows={derniersPointages} getRowKey={(row) => row.id} />
-              )}
-            </Card>
-          </div>
+              <Card className="dashboard-grid-full">
+                <div className="card-header">
+                  <h2 className="card-title">À vérifier</h2>
+                  {anomalyRows.length > 0 && (
+                    <Badge variant="danger">
+                      {anomalyRows.length} anomalie{anomalyRows.length > 1 ? 's' : ''}
+                    </Badge>
+                  )}
+                </div>
+                {anomalyRows.length === 0 ? (
+                  <div className="check-ok">
+                    <ShieldCheck size={18} />
+                    <span>Aucune anomalie à vérifier</span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="check-list">
+                      {anomalyRows.map((row) => (
+                        <div className="check-row" key={row.key}>
+                          <span className="check-row-name">{row.employeName}</span>
+                          <span className="check-row-detail">
+                            <AlertTriangle size={13} />
+                            {row.label}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="dashboard-card-footer">
+                      <Button variant="ghost" size="sm" icon={<ArrowRight size={16} />} onClick={() => navigate('/pointages')}>
+                        Voir les anomalies
+                      </Button>
+                    </div>
+                  </>
+                )}
+              </Card>
+
+              <Card className="dashboard-grid-full">
+                <div className="card-header">
+                  <h2 className="card-title">Derniers pointages reçus</h2>
+                </div>
+                {derniersPointages.length === 0 ? (
+                  <EmptyState icon={Inbox} title="Aucun pointage" description="Les pointages des employés apparaîtront ici." />
+                ) : (
+                  <ResponsiveTable columns={columns} rows={derniersPointages} getRowKey={(row) => row.id} />
+                )}
+              </Card>
+            </div>
+          ) : (
+            <div className="dashboard-grid">
+              <Card>
+                <div className="card-header">
+                  <h2 className="card-title">Activité par salarié — {periodLabel}</h2>
+                </div>
+                {employeeActivity.length === 0 ? (
+                  <EmptyState
+                    icon={Users}
+                    title="Aucune activité"
+                    description={`Aucun pointage sur la période « ${periodLabel} ».`}
+                  />
+                ) : (
+                  <div className="ranking-list">
+                    {employeeActivity.slice(0, ACTIVITY_DISPLAY_LIMIT).map((row) => (
+                      <div className="ranking-row" key={row.employeId}>
+                        <span className="ranking-row-name">{row.employeName}</span>
+                        <span className="ranking-row-value">
+                          {formatMinutes(row.workedMinutes)} · {row.interventionCount} intervention
+                          {row.interventionCount > 1 ? 's' : ''}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="dashboard-card-footer">
+                  <Button variant="ghost" size="sm" icon={<ArrowRight size={16} />} onClick={() => navigate('/employes')}>
+                    Voir tous les employés
+                  </Button>
+                </div>
+              </Card>
+
+              <Card>
+                <div className="card-header">
+                  <h2 className="card-title">Activité par chantier — {periodLabel}</h2>
+                </div>
+                {chantierActivity.length === 0 ? (
+                  <EmptyState
+                    icon={HardHat}
+                    title="Aucune activité"
+                    description={`Aucun pointage sur la période « ${periodLabel} ».`}
+                  />
+                ) : (
+                  <div className="ranking-list">
+                    {chantierActivity.slice(0, ACTIVITY_DISPLAY_LIMIT).map((row) => (
+                      <div className="ranking-row" key={row.chantierId}>
+                        <span className="ranking-row-name">{row.chantierName}</span>
+                        <span className="ranking-row-value">
+                          {formatMinutes(row.workedMinutes)} · {row.interventionCount} intervention
+                          {row.interventionCount > 1 ? 's' : ''}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="dashboard-card-footer">
+                  <Button variant="ghost" size="sm" icon={<ArrowRight size={16} />} onClick={() => navigate('/chantiers')}>
+                    Voir les chantiers
+                  </Button>
+                </div>
+              </Card>
+            </div>
+          )}
         </>
       )}
     </div>

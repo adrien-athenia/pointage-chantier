@@ -150,6 +150,58 @@ export function computeLiveMinutes<T extends Pointage>(
   }
 }
 
+export interface PeriodInterventionSummary<T extends Pointage = Pointage> {
+  employeId: string
+  chantierId: string
+  /** Toujours résolu (computeLiveMinutes si encore ouverte) — jamais null, jamais inventé. */
+  workedMinutes: number
+  isOpen: boolean
+  intervention: Intervention<T>
+}
+
+/**
+ * Reconstruit les interventions de TOUS les employés (regroupés puis
+ * passés à buildInterventions un par un, comme partout ailleurs) et ne
+ * garde que celles dont l'ARRIVÉE tombe dans [startMs, endMs] — même
+ * convention que l'export Excel Premium (buildExportRows dans
+ * src/lib/exportData.ts, non dupliquée ici) : une intervention appartient
+ * à la période de son arrivée, jamais de son départ, pour ne jamais
+ * couper une séquence arrivée/pause/départ à cheval sur la borne. Une
+ * intervention encore ouverte utilise computeLiveMinutes(nowMs), comme le
+ * reste de l'app.
+ */
+export function buildPeriodInterventions<T extends Pointage>(
+  pointages: T[],
+  startMs: number,
+  endMs: number,
+  nowMs: number,
+): PeriodInterventionSummary<T>[] {
+  const byEmploye = new Map<string, T[]>()
+  for (const pointage of pointages) {
+    const group = byEmploye.get(pointage.employe_id)
+    if (group) {
+      group.push(pointage)
+    } else {
+      byEmploye.set(pointage.employe_id, [pointage])
+    }
+  }
+
+  const results: PeriodInterventionSummary<T>[] = []
+  for (const [employeId, group] of byEmploye) {
+    const interventions = buildInterventions(group)
+    for (const intervention of interventions) {
+      const arriveeMs = new Date(intervention.arrivee.pointe_at).getTime()
+      if (arriveeMs < startMs || arriveeMs > endMs) continue
+
+      const live = intervention.isOpen ? computeLiveMinutes(intervention, nowMs) : null
+      const workedMinutes = live ? live.workedMinutes : (intervention.workedMinutes ?? 0)
+
+      results.push({ employeId, chantierId: intervention.chantierId, workedMinutes, isOpen: intervention.isOpen, intervention })
+    }
+  }
+  return results
+}
+
 export interface PeriodTotals {
   todayWorkedMinutes: number
   todayPauseMinutes: number

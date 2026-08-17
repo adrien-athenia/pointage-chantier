@@ -120,9 +120,16 @@ const SCHEDULE: Record<string, Record<EmployeKey, ChantierKey>> = {
 const WEEKDAYS = Object.keys(SCHEDULE).sort()
 
 // Les 3 cas de contrôle demandés — exclusivement ceux-ci, aucun autre.
+// Les 3 interventions restent clôturées (arrivee → pause → depart) : aucune
+// n'est laissée ouverte, pour que le Dashboard et les exports Excel ne
+// passent jamais par computeLiveMinutes sur une intervention du passé.
 const GPS_IMPRECIS_CASE = { date: '2026-08-05', employe: 'karim' as EmployeKey }
 const HORS_ZONE_CASE = { date: '2026-08-12', employe: 'enzo' as EmployeKey }
-const DEPART_MANQUANT_CASE = { date: '2026-08-14', employe: 'nicolas' as EmployeKey }
+// Localisation indisponible sur l'événement "depart" uniquement (règle
+// gps-indisponible existante d'anomalies.ts : latitude/longitude null sur
+// au moins un événement) — remplace l'ancien cas "départ manquant", qui
+// laissait l'intervention ouverte.
+const GPS_INDISPONIBLE_CASE = { date: '2026-08-14', employe: 'nicolas' as EmployeKey, type: 'depart' as PointageType }
 
 // Seuils lus tels quels dans src/lib/anomalies.ts (ACCURACY_THRESHOLD_M) et
 // dans les chantiers de démo créés par seed-demo.ts (rayon_autorise = 100 m)
@@ -219,10 +226,10 @@ export interface DemoPointageRow {
   chantier_id: string
   type: PointageType
   pointe_at: string
-  latitude: number
-  longitude: number
-  gps_accuracy: number
-  distance_chantier_m: number
+  latitude: number | null
+  longitude: number | null
+  gps_accuracy: number | null
+  distance_chantier_m: number | null
 }
 
 export interface ChantierCoords {
@@ -253,11 +260,11 @@ export function buildDemoPointages(
 
       const isGpsImprecisCase = GPS_IMPRECIS_CASE.date === date && GPS_IMPRECIS_CASE.employe === employeKey
       const isHorsZoneCase = HORS_ZONE_CASE.date === date && HORS_ZONE_CASE.employe === employeKey
-      const isDepartManquantCase = DEPART_MANQUANT_CASE.date === date && DEPART_MANQUANT_CASE.employe === employeKey
+      const isGpsIndisponibleCase = GPS_INDISPONIBLE_CASE.date === date && GPS_INDISPONIBLE_CASE.employe === employeKey
 
-      const eventTypes: PointageType[] = isDepartManquantCase
-        ? ['arrivee', 'pause_debut', 'pause_fin']
-        : ['arrivee', 'pause_debut', 'pause_fin', 'depart']
+      // Toujours les 4 événements : les 3 cas de contrôle restent des
+      // interventions complètes et clôturées.
+      const eventTypes: PointageType[] = ['arrivee', 'pause_debut', 'pause_fin', 'depart']
 
       for (const type of eventTypes) {
         const seedBase = `pointage:${employeKey}:${date}:${type}`
@@ -270,6 +277,26 @@ export function buildDemoPointages(
               : type === 'pause_fin'
                 ? minutesInRange(seedBase, ...PAUSE_FIN_RANGE)
                 : minutesInRange(seedBase, ...DEPART_RANGE)
+
+        // CAS C (localisation indisponible) : uniquement l'événement
+        // "depart" de cette journée n'a aucune position captée — jamais de
+        // valeur fabriquée, latitude/longitude/précision/distance restent
+        // NULL exactement comme le ferait un vrai pointage sans GPS
+        // disponible (voir 005_pointages_gps_and_pause.sql).
+        if (isGpsIndisponibleCase && type === GPS_INDISPONIBLE_CASE.type) {
+          rows.push({
+            id: deterministicUuid(seedBase),
+            employe_id: employeId,
+            chantier_id: chantierId,
+            type,
+            pointe_at: parisIso(date, formatHHMM(minutes)),
+            latitude: null,
+            longitude: null,
+            gps_accuracy: null,
+            distance_chantier_m: null,
+          })
+          continue
+        }
 
         // CAS B (hors zone) : uniquement l'événement "arrivee" de cette
         // journée est positionné loin du chantier — les autres événements
@@ -403,10 +430,10 @@ async function main() {
   console.log(`Événements de pointage créés : ${created}`)
   console.log(`Événements de pointage déjà existants : ${existing}`)
   console.log(`Total événements en base pour ce seed : ${rows.length}`)
-  console.log('\n3 cas de contrôle :')
-  console.log(`  GPS peu précis   — Karim, ${GPS_IMPRECIS_CASE.date}`)
-  console.log(`  Hors zone        — Enzo, ${HORS_ZONE_CASE.date}`)
-  console.log(`  Départ manquant  — Nicolas, ${DEPART_MANQUANT_CASE.date}`)
+  console.log('\n3 cas de contrôle (interventions complètes et clôturées) :')
+  console.log(`  GPS peu précis        — Karim, ${GPS_IMPRECIS_CASE.date}`)
+  console.log(`  Hors zone             — Enzo, ${HORS_ZONE_CASE.date}`)
+  console.log(`  Localisation indispo. — Nicolas, ${GPS_INDISPONIBLE_CASE.date} (événement "${GPS_INDISPONIBLE_CASE.type}")`)
   console.log('\nAucune photo n’a été créée par ce script.')
 }
 
